@@ -1,0 +1,85 @@
+{
+  "audit_id": "audit_1788822035",
+  "timestamp": "2026-09-07T23:00:35.132140+00:00",
+  "overall_status": "HEALTHY",
+  "checks": {
+    "gemini_ai": {
+      "status": "PASS",
+      "model": "gemini-3.6-flash",
+      "latency_ms": 5224,
+      "response_sample": "OK"
+    },
+    "vector_store": {
+      "status": "PASS",
+      "indexed_product": "AUDIT-SKU-1",
+      "latency_ms": "< 5ms"
+    },
+    "collision_isolation": {
+      "status": "PASS",
+      "isolation_verified": true,
+      "brand_a_sku": "APPAREL-101",
+      "brand_b_sku": "SHOES-202"
+    },
+    "sentiment_guardrails": {
+      "status": "PASS",
+      "deescalation_triggered": true,
+      "requires_human_flag": true
+    },
+    "meta_permissions_matrix": {
+      "status": "PASS",
+      "total_scopes_configured": 10,
+      "scopes": [
+        {
+          "scope": "pages_show_list",
+          "purpose": "Discover all Facebook Pages owned by user",
+          "required": true
+        },
+        {
+          "scope": "pages_read_engagement",
+          "purpose": "Read post engagement and inbound comments",
+          "required": true
+        },
+        {
+          "scope": "pages_manage_posts",
+          "purpose": "Manage feed items and comments",
+          "required": true
+        },
+        {
+          "scope": "pages_manage_metadata",
+          "purpose": "Subscribe pages to app webhooks automatically",
+          "required": true
+        },
+        {
+          "scope": "pages_messaging",
+          "purpose": "Send automated customer service DMs via Messenger",
+          "required": true
+        },
+        {
+          "scope": "instagram_basic",
+          "purpose": "Access linked Instagram Business accounts",
+          "required": true
+        },
+        {
+          "scope": "instagram_manage_comments",
+          "purpose": "Auto-reply to public Instagram Reel/Post comments",
+          "required": true
+        },
+        {
+          "scope": "instagram_manage_messages",
+          "purpose": "Auto-send private Instagram DMs with checkout link",
+          "required": true
+        },
+        {
+          "scope": "whatsapp_business_messaging",
+          "purpose": "Send customer notification & conversational replies",
+          "required": true
+        },
+        {
+          "scope": "whatsapp_business_management",
+          "purpose": "Manage phone number IDs and WhatsApp templates",
+          "required": true
+        }
+      ]
+    }
+  }
+}
