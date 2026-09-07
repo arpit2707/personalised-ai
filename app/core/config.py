@@ -1,9 +1,8 @@
 ﻿from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
 
 class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
-    DEFAULT_MODEL: str = "gemini-1.5-flash"
+    DEFAULT_MODEL: str = "gemini-3.6-flash"
     CHROMA_PERSIST_DIR: str = "./chroma_db"
     ENVIRONMENT: str = "development"
     HOST: str = "0.0.0.0"
