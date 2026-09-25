@@ -16,7 +16,10 @@ services:
         value: production
       - key: GEMINI_API_KEY
         sync: false
-      # The free plan has no persistent disk, so the product vector store is
-      # rebuilt from the catalog after each restart.
-      - key: CHROMA_PERSIST_DIR
-        value: /tmp/chroma_db
+      # Same Supabase connection string the backend uses (reel2real-api DATABASE_URL).
+      # Products are read from its "Product" table; embeddings live in the "ai" schema.
+      - key: DATABASE_URL
+        sync: false
+      # Shared secret; set the same value as AI_SERVICE_TOKEN on reel2real-api.
+      - key: AI_SERVICE_TOKEN
+        generateValue: true
