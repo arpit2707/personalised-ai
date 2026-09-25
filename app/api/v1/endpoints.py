@@ -1,4 +1,6 @@
-﻿from fastapi import APIRouter, HTTPException
+﻿import hmac
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 from typing import List
 from app.models.schemas import (
     GenerateReplyRequest,
@@ -10,6 +12,14 @@ from app.services.guardrails import guardrails
 from app.services.vector_store import catalog_store
 from app.services.prompt_assembler import prompt_assembler
 from app.services.gemini_service import gemini_service
+from app.core.config import settings
+
+
+def require_service_token(x_ai_service_token: str = Header(default="")):
+    """Only the Reel2Real backend may call the paid endpoints once a token is configured."""
+    if settings.AI_SERVICE_TOKEN and not hmac.compare_digest(x_ai_service_token, settings.AI_SERVICE_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid service token")
+
 
 router = APIRouter()
 
@@ -21,16 +31,23 @@ def health_check():
         "vector_store": "ready"
     }
 
-@router.post("/catalog/product", response_model=dict)
+@router.post("/catalog/product", response_model=dict, dependencies=[Depends(require_service_token)])
 def upsert_product(brand_id: str, product: ProductInfo):
-    catalog_store.upsert_product(brand_id, product)
+    try:
+        catalog_store.upsert_product(brand_id, product)
+    except PermissionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     return {"status": "success", "message": f"Product {product.sku} upserted for brand {brand_id}"}
 
-@router.get("/catalog/search", response_model=List[ProductInfo])
+@router.post("/catalog/reindex", response_model=dict, dependencies=[Depends(require_service_token)])
+def reindex_catalog(brand_id: str):
+    return {"status": "success", "embedded": catalog_store.reindex(brand_id)}
+
+@router.get("/catalog/search", response_model=List[ProductInfo], dependencies=[Depends(require_service_token)])
 def search_catalog(brand_id: str, query: str, limit: int = 2):
     return catalog_store.search_products(brand_id, query, limit=limit)
 
-@router.post("/generate-reply", response_model=GenerateReplyResponse)
+@router.post("/generate-reply", response_model=GenerateReplyResponse, dependencies=[Depends(require_service_token)])
 def generate_reply(req: GenerateReplyRequest):
     # Step 1: Guardrail & Sentiment Analysis
     sentiment, requires_human, deescalation = guardrails.evaluate_sentiment_and_safety(req.message_text)
