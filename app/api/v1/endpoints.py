@@ -1,4 +1,4 @@
-﻿import hmac
+import hmac
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from typing import List
@@ -12,6 +12,7 @@ from app.services.guardrails import guardrails
 from app.services.vector_store import catalog_store
 from app.services.prompt_assembler import prompt_assembler
 from app.services.gemini_service import gemini_service
+from app.services import catalog_reply
 from app.core.config import settings
 
 
@@ -61,6 +62,14 @@ def generate_reply(req: GenerateReplyRequest):
             detected_product_sku=None,
             reasoning="Triggered negative/complaint sentiment guardrail. Flagged for human review."
         )
+
+    # Catalog mode: the Reel2Real backend picked the offerings and owns the
+    # catalog, so answer only from what it sent.
+    if req.offerings is not None:
+        persona = req.brand_persona or BrandPersona(brand_name="Reel2Real Brand")
+        raw = gemini_service.generate_strict(
+            catalog_reply.build_system_prompt(persona, req), catalog_reply.build_user_prompt(req))
+        return catalog_reply.finalize(req, raw)
 
     # Step 2: Product Context Retrieval
     target_product = None

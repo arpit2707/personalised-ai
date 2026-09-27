@@ -1,0 +1,101 @@
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.services import catalog_reply
+from app.services.gemini_service import gemini_service
+
+client = TestClient(app)
+
+MAKEUP = {
+    "brand_id": "org_makeup",
+    "channel_type": "instagram",
+    "event_type": "comment",
+    "message_text": "Is look ka kitna?",
+    "sender_id": "u1",
+    "post_context": {"post_id": "ig_1"},
+    "brand_persona": {"brand_name": "Glam by Riya"},
+    "business": {"industry": "BEAUTY_SERVICE", "industry_label": "Makeup artist / salon", "city": "Patna"},
+    "playbook": {
+        "goal": "BOOKING",
+        "lead_fields": [
+            {"key": "date", "label": "Event date", "ask": "Aapka function kis date ko hai?"},
+            {"key": "city", "label": "City", "ask": "Aap kis city me ho?"},
+        ],
+        "rules": ["Prices are starting from."],
+    },
+    "offerings": [
+        {
+            "id": "off_bridal",
+            "type": "PACKAGE",
+            "title": "Bridal full look",
+            "price_label": "₹18,000 se start",
+            "price_mode": "STARTING_FROM",
+            "price_min": 18000,
+            "includes": ["Face makeup", "Hair styling", "Draping"],
+            "linked_to_post": True,
+        }
+    ],
+    "goal_state": {"fields": {"city": "Patna"}},
+    "recent_messages": [{"from": "customer", "text": "hi"}],
+}
+
+
+def post(payload, raw, monkeypatch):
+    monkeypatch.setattr(gemini_service, "generate_strict", lambda *_: raw)
+    res = client.post("/api/v1/generate-reply", json=payload)
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def test_catalog_price_passes_and_fields_are_filtered(monkeypatch):
+    data = post(MAKEUP, {
+        "public_reply": "DM check karo!",
+        "private_dm": "Bridal full look ₹18,000 se start. Function kis date ko hai?",
+        "intent": "price_inquiry",
+        "action": "ASK_FIELD",
+        "offering_ids": ["off_bridal", "made_up_id"],
+        "collected_fields": {"city": "Patna", "favourite_colour": "red"},
+    }, monkeypatch)
+    assert data["action"] == "ASK_FIELD"
+    assert data["offering_ids"] == ["off_bridal"]
+    assert data["collected_fields"] == {"city": "Patna"}
+    assert "18,000" in data["private_dm"]
+
+
+def test_invented_price_is_blocked(monkeypatch):
+    data = post(MAKEUP, {
+        "public_reply": "Sirf ₹12,000!",
+        "private_dm": "Ye look ₹12,000 me ho jayega",
+        "action": "ANSWER",
+    }, monkeypatch)
+    assert data["action"] == "HANDOFF"
+    assert data["requires_human_attention"] is True
+    assert "12,000" not in data["private_dm"]
+    assert data["intent"] == "price_blocked"
+
+
+def test_model_down_answers_from_linked_offering_only(monkeypatch):
+    data = post(MAKEUP, None, monkeypatch)
+    assert data["private_dm"].startswith("Bridal full look: ₹18,000 se start")
+    assert data["offering_ids"] == ["off_bridal"]
+
+
+def test_model_down_with_no_catalog_match_hands_over(monkeypatch):
+    payload = {**MAKEUP, "offerings": []}
+    data = post(payload, None, monkeypatch)
+    assert data["action"] == "HANDOFF"
+    assert "₹" not in data["private_dm"]
+
+
+def test_prompt_lists_only_missing_fields():
+    from app.models.schemas import GenerateReplyRequest
+
+    req = GenerateReplyRequest.model_validate(MAKEUP)
+    prompt = catalog_reply.build_user_prompt(req)
+    assert "Aapka function kis date ko hai?" in prompt
+    assert "Aap kis city me ho?" not in prompt
+    assert '"shown_in_this_post": true' in prompt
+
+
+def test_amount_parsing():
+    assert catalog_reply.extract_amounts("₹18k se start, budget 45 lakh, 1499/-") == [18000, 1499, 4500000]

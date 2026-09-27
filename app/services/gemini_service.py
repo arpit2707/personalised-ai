@@ -1,4 +1,4 @@
-﻿import json
+import json
 import logging
 from typing import Optional, Dict, Any
 from app.core.config import settings
@@ -14,6 +14,27 @@ class GeminiService:
                 self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
             except Exception as e:
                 logger.warning(f"Failed to initialize Google GenAI Client: {e}")
+
+    def generate_strict(self, system_instruction: str, user_prompt: str) -> Optional[Dict[str, Any]]:
+        """Like generate, but returns None instead of the canned fallback, so
+        catalog replies can fall back to facts rather than generic text."""
+        if not (self._client and settings.GEMINI_API_KEY):
+            return None
+        try:
+            from google.genai import types
+            response = self._client.models.generate_content(
+                model=settings.DEFAULT_MODEL,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    temperature=0.4,
+                ),
+            )
+            return json.loads(response.text) if response.text else None
+        except Exception as e:
+            logger.error(f"Gemini API invocation error: {e}")
+            return None
 
     def generate(self, system_instruction: str, user_prompt: str) -> Dict[str, Any]:
         if self._client and settings.GEMINI_API_KEY:
