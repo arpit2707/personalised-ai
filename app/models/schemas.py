@@ -43,7 +43,9 @@ class ProductInfo(BaseModel):
 
 class PostContext(BaseModel):
     post_id: str
-    caption: Optional[str] = ""
+    caption: Optional[str] = Field(default="", max_length=2000)
+    # The seller's own note about the post ("offer valid till Sunday").
+    note: Optional[str] = Field(default=None, max_length=1000)
     tagged_product_sku: Optional[str] = None
 
 class OfferingVariant(BaseModel):

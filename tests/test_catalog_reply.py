@@ -144,6 +144,32 @@ def test_greeting_with_empty_catalog_is_answered(monkeypatch):
     assert "Patna" in data["private_dm"]
 
 
+def test_prompt_includes_post_caption_and_seller_note():
+    from app.models.schemas import GenerateReplyRequest
+    req = GenerateReplyRequest.model_validate({
+        **MAKEUP,
+        "post_context": {"post_id": "ig_1", "caption": "Wedding season offer!", "note": "Offer valid till Sunday"},
+    })
+    prompt = catalog_reply.build_user_prompt(req)
+    assert "POST the customer is reacting to" in prompt
+    assert "Wedding season offer!" in prompt
+    assert '"seller_note": "Offer valid till Sunday"' in prompt
+
+
+def test_prompt_has_no_post_section_without_caption_or_note():
+    from app.models.schemas import GenerateReplyRequest
+    prompt = catalog_reply.build_user_prompt(GenerateReplyRequest.model_validate(MAKEUP))
+    assert "POST the customer is reacting to" not in prompt
+
+
+def test_price_in_a_caption_is_still_blocked(monkeypatch):
+    payload = {**MAKEUP, "post_context": {"post_id": "ig_1", "caption": "Sirf ₹9,999 me bridal look"}}
+    data = post(payload, {"public_reply": "DM check karo", "private_dm": "Ye look ₹9,999 ka hai",
+                          "intent": "price_inquiry", "action": "ANSWER", "offering_ids": ["off_bridal"]}, monkeypatch)
+    assert "9,999" not in (data["private_dm"] or "")
+    assert data["requires_human_attention"] is True
+
+
 def test_prompt_answers_page_questions_instead_of_handing_over():
     from app.models.schemas import BrandPersona, GenerateReplyRequest
     req = GenerateReplyRequest(**{**MAKEUP, "offerings": []})
