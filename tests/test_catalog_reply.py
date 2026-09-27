@@ -87,6 +87,39 @@ def test_model_down_with_no_catalog_match_hands_over(monkeypatch):
     assert "₹" not in data["private_dm"]
 
 
+def test_empty_catalog_still_answers_about_the_business(monkeypatch):
+    payload = {
+        **MAKEUP,
+        "event_type": "dm",
+        "message_text": "May I know something about your page?",
+        "offerings": [],
+        "business": {**MAKEUP["business"], "description": "Bridal and party makeup artist in Patna, home visits too."},
+    }
+    data = post(payload, {
+        "private_dm": "Hum Patna me bridal aur party makeup karte hain, home visit bhi.",
+        "intent": "general",
+        "action": "ANSWER",
+    }, monkeypatch)
+    assert data["action"] == "ANSWER"
+    assert data["requires_human_attention"] is False
+    assert "Patna" in data["private_dm"]
+
+
+def test_empty_catalog_without_business_info_hands_over(monkeypatch):
+    def model(*_):
+        raise AssertionError("Should not generate")
+    monkeypatch.setattr(gemini_service, "generate", model)
+    res = client.post("/api/v1/generate-reply", json={**MAKEUP, "offerings": []})
+    assert res.json()["action"] == "HANDOFF"
+
+
+def test_prompt_answers_greetings_from_business_info():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    req = GenerateReplyRequest.model_validate(MAKEUP)
+    prompt = catalog_reply.build_system_prompt(BrandPersona(brand_name="Glam by Riya"), req)
+    assert "Greetings" in prompt
+
+
 def test_prompt_lists_only_missing_fields():
     from app.models.schemas import GenerateReplyRequest
 

@@ -144,7 +144,9 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
 
 def offering_reply(req, row, memory, failed):
     """Backend-picked offerings use the same safety, memory and handoff lifecycle."""
-    if not req.offerings:
+    # An empty catalog still lets the model greet and answer questions about the
+    # business from its description; it hands over itself when it needs the catalog.
+    if not req.offerings and not (req.business and req.business.description):
         return handoff(req, row, 'missing_information')
     persona = req.brand_persona or BrandPersona(brand_name='Reel2Real Brand')
     if contains_blocked_content(memory):
