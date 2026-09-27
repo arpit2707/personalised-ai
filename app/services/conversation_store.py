@@ -94,6 +94,8 @@ class ConversationStore:
             row = db.execute("SELECT * FROM conversations WHERE brand=? AND channel=? AND sender=?",
                              (req.brand_id, req.channel_type, req.sender_id)).fetchone()
             cid = row['id']
+            if getattr(req, 'resume_if_pending', False) and row['status'] == 'pending' and row['agent'] is None:
+                db.execute("UPDATE conversations SET status='ai',reason=NULL,unresolved=0 WHERE id=?", (cid,))
             db.execute("INSERT INTO messages(conversation,role,text,created) VALUES(?,?,?,?)",
                        (cid, 'user', req.message_text, now))
             db.execute("UPDATE conversations SET updated=?,version=version+1 WHERE id=?", (now, cid))
