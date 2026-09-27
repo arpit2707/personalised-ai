@@ -132,3 +132,20 @@ def test_prompt_lists_only_missing_fields():
 
 def test_amount_parsing():
     assert catalog_reply.extract_amounts("₹18k se start, budget 45 lakh, 1499/-") == [18000, 1499, 4500000]
+
+
+def test_greeting_with_empty_catalog_is_answered(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "Hi how are you?", "offerings": [],
+               "business": {**MAKEUP["business"], "description": "Bridal and party makeup in Patna"}}
+    data = post(payload, {"private_dm": "Hi! Main theek hoon. Hum Patna me bridal aur party makeup karte hain.",
+                          "intent": "general", "action": "ANSWER"}, monkeypatch)
+    assert data["action"] == "ANSWER"
+    assert data["requires_human_attention"] is False
+    assert "Patna" in data["private_dm"]
+
+
+def test_prompt_answers_page_questions_instead_of_handing_over():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    req = GenerateReplyRequest(**{**MAKEUP, "offerings": []})
+    system = catalog_reply.build_system_prompt(BrandPersona(brand_name="Glam"), req)
+    assert "Greetings, small talk and questions about the page" in system

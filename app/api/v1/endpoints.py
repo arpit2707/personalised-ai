@@ -143,9 +143,12 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
 
 
 def offering_reply(req, row, memory, failed):
-    """Backend-picked offerings use the same safety, memory and handoff lifecycle."""
-    # An empty catalog still lets the model greet and answer questions about the
-    # business from its description; it hands over itself when it needs the catalog.
+    """Backend-picked offerings use the same safety, memory and handoff lifecycle.
+
+    An empty catalog still lets the model greet and answer questions about the
+    business from its description; it hands over itself when it needs the catalog,
+    or immediately if there is no business description either.
+    """
     if not req.offerings and not (req.business and req.business.description):
         return handoff(req, row, 'missing_information')
     persona = req.brand_persona or BrandPersona(brand_name='Reel2Real Brand')

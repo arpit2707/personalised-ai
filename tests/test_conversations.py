@@ -184,3 +184,20 @@ def test_customer_and_channel_isolation():
     three = send(channel_type='whatsapp').json()
     assert len({one['conversation_id'], two['conversation_id'], three['conversation_id']}) == 3
     assert two['conversation_status'] == three['conversation_status'] == 'ai'
+
+
+def test_backend_resume_reopens_unclaimed_handoff():
+    first = send('I need a human').json()
+    assert first['conversation_status'] == 'pending'
+    # Other callers keep the queue.
+    assert send('Hello again').json()['private_dm'] is None
+    # The backend asks to reopen once its own pause is over.
+    again = send('Hello again', resume_if_pending=True).json()
+    assert again['conversation_status'] == 'ai'
+    assert again['private_dm']
+
+
+def test_backend_resume_leaves_claimed_chat_with_agent():
+    cid = send('human please').json()['conversation_id']
+    client.post('/api/v1/conversations/' + cid + '/claim', json={'agent_id': 'alice'})
+    assert send('size?', resume_if_pending=True).json()['private_dm'] is None
