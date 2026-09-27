@@ -2,7 +2,7 @@ import json
 import logging
 import time
 from app.core.config import settings
-from app.models.schemas import ModelReply
+from app.models.schemas import ModelReply, ModelReplyWire
 from app.services.guardrails import SAFETY_INSTRUCTION, SAFETY_REFUSAL, contains_blocked_content
 
 logger = logging.getLogger(__name__)
@@ -10,6 +10,17 @@ logger = logging.getLogger(__name__)
 
 class LLMUnavailable(Exception):
     pass
+
+
+def _from_wire(result):
+    """Turns the [{key, value}] list Gemini returns back into a dict."""
+    if isinstance(result, dict) and isinstance(result.get("collected_fields"), list):
+        result["collected_fields"] = {
+            str(f["key"]): str(f["value"])
+            for f in result["collected_fields"]
+            if isinstance(f, dict) and f.get("key") and f.get("value") is not None
+        }
+    return result
 
 
 class GeminiService:
@@ -38,11 +49,11 @@ class GeminiService:
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction + "\n\n" + SAFETY_INSTRUCTION,
                     response_mime_type="application/json",
-                    response_schema=ModelReply,
+                    response_schema=ModelReplyWire,
                     temperature=0.2,
                 ),
             )
-            result = json.loads(response.text or "null")
+            result = _from_wire(json.loads(response.text or "null"))
             if contains_blocked_content(result) or (isinstance(result, dict) and result.get("intent") == "safety_refusal"):
                 return refusal
             result = ModelReply.model_validate(result).model_dump()
