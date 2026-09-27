@@ -1,0 +1,25 @@
+# Render Blueprint for the AI service. The backend (reel2real-api) calls
+# {this service}/api/v1/generate-reply via its AI_SERVICE_URL env var.
+services:
+  - type: web
+    name: reel2real-ai
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: ENVIRONMENT
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      # Same Supabase connection string the backend uses (reel2real-api DATABASE_URL).
+      # Products are read from its "Product" table; embeddings live in the "ai" schema.
+      - key: DATABASE_URL
+        sync: false
+      # Shared secret; set the same value as AI_SERVICE_TOKEN on reel2real-api.
+      - key: AI_SERVICE_TOKEN
+        generateValue: true
