@@ -1,63 +1,63 @@
-﻿import json
+import json
 import logging
-from typing import Optional, Dict, Any
+import time
 from app.core.config import settings
+from app.models.schemas import ModelReply
+from app.services.guardrails import SAFETY_INSTRUCTION, SAFETY_REFUSAL, contains_blocked_content
 
 logger = logging.getLogger(__name__)
+
+
+class LLMUnavailable(Exception):
+    pass
+
 
 class GeminiService:
     def __init__(self):
         self._client = None
-        if settings.GEMINI_API_KEY:
-            try:
-                from google import genai
-                self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
-            except Exception as e:
-                logger.warning(f"Failed to initialize Google GenAI Client: {e}")
 
-    def generate(self, system_instruction: str, user_prompt: str) -> Dict[str, Any]:
-        if self._client and settings.GEMINI_API_KEY:
-            try:
-                from google.genai import types
-                response = self._client.models.generate_content(
-                    model=settings.DEFAULT_MODEL,
-                    contents=user_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        response_mime_type="application/json",
-                        temperature=0.7,
-                    )
+    def generate(self, system_instruction: str, user_prompt: str) -> dict:
+        refusal = {"public_reply": SAFETY_REFUSAL, "private_dm": SAFETY_REFUSAL,
+                   "intent": "safety_refusal", "reasoning": None}
+        if contains_blocked_content([system_instruction, user_prompt]):
+            return refusal
+        if not settings.GEMINI_API_KEY:
+            raise LLMUnavailable("Generation is not configured")
+        started = time.monotonic()
+        try:
+            from google import genai
+            from google.genai import types
+            if self._client is None:
+                self._client = genai.Client(
+                    api_key=settings.GEMINI_API_KEY,
+                    http_options=types.HttpOptions(timeout=settings.LLM_TIMEOUT_MS,
+                        retry_options=types.HttpRetryOptions(attempts=2)),
                 )
-                if response.text:
-                    return json.loads(response.text)
-            except Exception as e:
-                logger.error(f"Gemini API invocation error: {e}")
+            response = self._client.models.generate_content(
+                model=settings.DEFAULT_MODEL, contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction + "\n\n" + SAFETY_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=ModelReply,
+                    temperature=0.2,
+                ),
+            )
+            result = json.loads(response.text or "null")
+            if contains_blocked_content(result) or (isinstance(result, dict) and result.get("intent") == "safety_refusal"):
+                return refusal
+            result = ModelReply.model_validate(result).model_dump()
+            if not result['private_dm'].strip() and not result['handoff_reason']:
+                raise ValueError("Empty reply")
+            usage = getattr(response, "usage_metadata", None)
+            logger.info("llm_generation model=%s elapsed_ms=%d input_tokens=%s output_tokens=%s",
+                        settings.DEFAULT_MODEL, (time.monotonic() - started) * 1000,
+                        getattr(usage, "prompt_token_count", None), getattr(usage, "candidates_token_count", None))
+            return result
+        except Exception as exc:
+            # Do not log customer text or provider exceptions containing request bodies.
+            logger.warning("llm_generation_failed type=%s elapsed_ms=%d", type(exc).__name__,
+                           (time.monotonic() - started) * 1000)
+            raise LLMUnavailable("Generation failed") from exc
 
-        # Intelligent local fallback when GEMINI_API_KEY is not yet populated
-        return self._local_fallback(user_prompt)
-
-    def _local_fallback(self, user_prompt: str) -> Dict[str, Any]:
-        lower_prompt = user_prompt.lower()
-        if "price" in lower_prompt or "kitne" in lower_prompt or "cost" in lower_prompt:
-            return {
-                "public_reply": "Hey! Sent you the exclusive price and direct order link in your DM! 🛍️✨",
-                "private_dm": "Hey there! Thanks for your interest. You can check the complete product details, price, and place your order directly here: https://brand.com/checkout. Let us know if you need any help with sizing! 💖",
-                "intent": "price_inquiry",
-                "reasoning": "Detected price inquiry in customer message."
-            }
-        elif "size" in lower_prompt or "m available" in lower_prompt or "large" in lower_prompt:
-            return {
-                "public_reply": "Yes, sizes are currently in stock! Dropped the size chart in your DM! 👗",
-                "private_dm": "Hello! Yes, standard sizes (S, M, L, XL) are currently in stock and shipping within 24 hours. Check out the size guide and place your order here: https://brand.com/checkout 🛍️",
-                "intent": "size_availability",
-                "reasoning": "Detected size question in customer message."
-            }
-        else:
-            return {
-                "public_reply": "Hey! Sent you all the details in your DM, please check! ✨",
-                "private_dm": "Hi! Thanks for reaching out to us. We have shared the complete details with you. Feel free to ask if you have any questions! 🙌",
-                "intent": "general",
-                "reasoning": "General query response."
-            }
 
 gemini_service = GeminiService()

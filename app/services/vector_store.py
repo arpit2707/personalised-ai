@@ -1,4 +1,4 @@
-﻿import chromadb
+import chromadb
 import hashlib
 from typing import List, Optional
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
@@ -8,6 +8,17 @@ from app.models.schemas import ProductInfo
 class LightweightEmbeddingFunction(EmbeddingFunction):
     def __init__(self):
         pass
+
+    @staticmethod
+    def name():
+        return "r2r-word-hash-v1"
+
+    def get_config(self):
+        return {}
+
+    @staticmethod
+    def build_from_config(config):
+        return LightweightEmbeddingFunction()
 
     def __call__(self, input: Documents) -> Embeddings:
         results = []
@@ -23,12 +34,18 @@ class LightweightEmbeddingFunction(EmbeddingFunction):
 
 class CatalogStore:
     def __init__(self):
-        self.client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
+        self._client = None
         self.embedding_fn = LightweightEmbeddingFunction()
 
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
+        return self._client
+
     def _get_collection(self, brand_id: str):
-        safe_brand = "".join(c if c.isalnum() else "_" for c in brand_id).lower()
-        collection_name = f"catalog_{safe_brand}"[:63]
+        # Exact brand identity; punctuation, case and truncation must not collide.
+        collection_name = "catalog_v2_" + hashlib.sha256(brand_id.encode("utf-8")).hexdigest()[:48]
         return self.client.get_or_create_collection(
             name=collection_name,
             embedding_function=self.embedding_fn,
@@ -41,6 +58,7 @@ class CatalogStore:
         
         metadata = {
             "sku": product.sku,
+            "description": product.description or "",
             "title": product.title,
             "price": float(product.price),
             "currency": product.currency,
@@ -65,7 +83,7 @@ class CatalogStore:
             return ProductInfo(
                 sku=m["sku"],
                 title=m["title"],
-                description="",
+                description=m.get("description", ""),
                 price=float(m["price"]),
                 currency=m.get("currency", "INR"),
                 in_stock=bool(m.get("in_stock", 1)),
@@ -93,7 +111,7 @@ class CatalogStore:
                     ProductInfo(
                         sku=m["sku"],
                         title=m["title"],
-                        description="",
+                        description=m.get("description", ""),
                         price=float(m["price"]),
                         currency=m.get("currency", "INR"),
                         in_stock=bool(m.get("in_stock", 1)),

@@ -1,9 +1,35 @@
-﻿from fastapi import FastAPI
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.services.conversation_store import conversation_store
+
+
+@asynccontextmanager
+async def lifespan(app):
+    await asyncio.to_thread(conversation_store.purge)
+
+    async def cleanup():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await asyncio.to_thread(conversation_store.purge)
+            except Exception:
+                logging.getLogger(__name__).error("Conversation retention cleanup failed")
+
+    task = asyncio.create_task(cleanup())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 app = FastAPI(
+    lifespan=lifespan,
     title="Reel2Real Personalised AI Core",
     version="1.0.0",
     description="Dedicated AI Intelligence Microservice for Reel2Real Omnichannel Automation"

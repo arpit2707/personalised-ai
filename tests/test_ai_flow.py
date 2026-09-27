@@ -53,6 +53,7 @@ def test_negative_sentiment_guardrail():
     assert "apologize" in data["private_dm"].lower()
 
 def test_price_inquiry_reply_generation():
+    test_catalog_upsert_and_search()
     payload = {
         "brand_id": "test_brand",
         "channel_type": "instagram",

@@ -1,4 +1,5 @@
-﻿from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
@@ -7,6 +8,12 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    CONVERSATION_DB_PATH: str = "./data/conversations.sqlite3"
+    MEMORY_RETENTION_DAYS: int = Field(default=20, ge=20, le=20)
+    HISTORY_MAX_MESSAGES: int = Field(default=20, ge=2, le=100)
+    HISTORY_MAX_CHARS: int = Field(default=12000, ge=1000, le=50000)
+    SERVICE_API_KEYS: dict[str, str] = Field(default_factory=dict)
+    LLM_TIMEOUT_MS: int = Field(default=15000, ge=1000, le=60000)
     
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

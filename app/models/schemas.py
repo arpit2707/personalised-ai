@@ -1,5 +1,5 @@
-﻿from pydantic import BaseModel, Field
-from typing import Optional, List
+from pydantic import BaseModel, Field
+from typing import Optional, List, Literal
 from enum import Enum
 
 class ToneEnum(str, Enum):
@@ -47,11 +47,11 @@ class PostContext(BaseModel):
     tagged_product_sku: Optional[str] = None
 
 class GenerateReplyRequest(BaseModel):
-    brand_id: str
-    channel_type: str = "instagram"  # instagram, facebook, whatsapp
-    event_type: str = "comment"      # comment, dm
-    message_text: str
-    sender_id: str
+    brand_id: str = Field(min_length=1, max_length=128)
+    channel_type: Literal["instagram", "facebook", "whatsapp"] = "instagram"
+    event_type: Literal["comment", "dm"] = "comment"
+    message_text: str = Field(min_length=1, max_length=8000)
+    sender_id: str = Field(min_length=1, max_length=256)
     post_context: Optional[PostContext] = None
     brand_persona: Optional[BrandPersona] = None
 
@@ -63,3 +63,35 @@ class GenerateReplyResponse(BaseModel):
     requires_human_attention: bool = False
     detected_product_sku: Optional[str] = None
     reasoning: Optional[str] = None
+    conversation_id: Optional[str] = None
+    conversation_status: Literal["ai", "pending", "active"] = "ai"
+    handoff_reason: Optional[str] = None
+    lead_interested: bool = False
+
+
+class PreferenceEvidence(BaseModel):
+    key: Literal["size", "color", "language"]
+    value: str = Field(min_length=1, max_length=80)
+    evidence: str = Field(min_length=1, max_length=200)
+
+
+class ModelReply(BaseModel):
+    public_reply: Optional[str] = Field(default=None, max_length=2000)
+    private_dm: str = Field(max_length=4000)
+    intent: str = Field(default="general", max_length=64)
+    reasoning: Optional[str] = Field(default=None, max_length=500)
+    handoff_reason: Optional[Literal[
+        "human_request", "complaint", "order_support", "purchase_assistance",
+        "missing_information", "conflicting_information",
+    ]] = None
+    previous_answer_unresolved: bool = False
+    buying_interest: bool = False
+    preferences: List[PreferenceEvidence] = Field(default_factory=list, max_length=3)
+
+
+class AgentAction(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=128)
+
+
+class AgentMessage(AgentAction):
+    message_text: str = Field(min_length=1, max_length=4000)
