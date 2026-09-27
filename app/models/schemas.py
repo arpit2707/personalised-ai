@@ -159,6 +159,18 @@ class ModelReply(BaseModel):
     preferences: List[PreferenceEvidence] = Field(default_factory=list, max_length=3)
 
 
+class CollectedField(BaseModel):
+    key: str = Field(max_length=64)
+    value: str = Field(max_length=200)
+
+
+class ModelReplyWire(ModelReply):
+    """The schema Gemini is asked to fill. The Developer API rejects free-form
+    objects (dict-typed fields), so collected fields come back as a list of
+    key/value pairs and are turned into ModelReply's dict afterwards."""
+    collected_fields: List[CollectedField] = Field(default_factory=list, max_length=20)
+
+
 class AgentAction(BaseModel):
     agent_id: str = Field(min_length=1, max_length=128)
 
