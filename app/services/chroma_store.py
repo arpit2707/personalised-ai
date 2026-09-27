@@ -33,6 +33,11 @@ class LightweightEmbeddingFunction(EmbeddingFunction):
         return results
 
 class CatalogStore:
+    managed_externally = False
+
+    def reindex(self, brand_id: str) -> int:
+        return self._get_collection(brand_id).count()
+
     def __init__(self):
         self._client = None
         self.embedding_fn = LightweightEmbeddingFunction()

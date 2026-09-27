@@ -12,6 +12,8 @@ def isolated_services(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'CHROMA_PERSIST_DIR', str(tmp_path / 'catalog'))
     monkeypatch.setattr(settings, 'CONVERSATION_DB_PATH', str(tmp_path / 'conversations.sqlite3'))
     monkeypatch.setattr(settings, 'GEMINI_API_KEY', '')
+    monkeypatch.setattr(settings, 'DATABASE_URL', '')
+    monkeypatch.setattr(settings, 'AI_SERVICE_TOKEN', '')
     monkeypatch.setattr(settings, 'SERVICE_API_KEYS', {'key-a': 'test_brand', 'key-b': 'other_brand'})
     monkeypatch.setattr(endpoints, 'conversation_store', ConversationStore())
     monkeypatch.setattr(endpoints, 'catalog_store', CatalogStore())

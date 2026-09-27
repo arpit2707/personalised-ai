@@ -1,18 +1,22 @@
 # Reel2Real Personalised AI Core Engine
 
 FastAPI service for merchant-specific product and sales replies, using Google Gemini
-(`DEFAULT_MODEL`) and a persistent Chroma catalog. Order tracking, cancellation,
+(`DEFAULT_MODEL`) and Supabase/pgvector in cloud deployments (persistent Chroma locally). Order tracking, cancellation,
 refund and payment actions are outside the AI's scope and go to the human queue.
 
 ## Setup
 
-1. Activate `.venv` and install `requirements.txt`.
+1. Activate `.venv` and install `requirements-local.txt` for local Chroma, or `requirements.txt` for cloud Supabase.
 2. Copy `.env.example` to `.env` only if `.env` does not already exist.
 3. Configure `GEMINI_API_KEY`, a model available to your account, and
-   `SERVICE_API_KEYS={"long-random-backend-secret":"exact-brand-id"}`.
+   `SERVICE_API_KEYS={"long-random-backend-secret":"exact-brand-id"}` locally.
+   Cloud: set `DATABASE_URL` to the backend Supabase database and `AI_SERVICE_TOKEN`
+   to the same secret used by the backend. `render.yaml` preserves the existing Render blueprint.
 4. Run `uvicorn app.main:app --reload --port 8000`.
 
-All merchant endpoints require `X-Service-Key`. The authenticated brand must match
+Merchant endpoints accept per-brand `X-Service-Key` or the existing trusted-backend
+`X-AI-Service-Token`. For the shared backend token, supply `brand_id` in the request
+body/query, or `X-Brand-ID` for inbox/agent routes. Never expose this shared token to clients. The authenticated brand must match
 `brand_id`. Missing key configuration returns 503; invalid keys return 401;
 merchant mismatches return 403. Health and API docs remain public.
 Keys belong in a trusted backend, never a browser. The backend must authenticate
@@ -61,8 +65,11 @@ it stays pending and AI stays paused (subject to the 20-day inactivity expiry).
 
 ## Memory and retention
 
-SQLite (`CONVERSATION_DB_PATH`) persists chat and explicit size/color/language
-preferences across restarts. Preferences require a supporting quote from the current
+With `DATABASE_URL`, Supabase tables `ai.conversations`, `ai.messages`, and
+`ai.preferences` persist memory across Render restarts/deployments. Initialization
+creates only these AI tables; the backend's product tables are not modified.
+Without `DATABASE_URL`, local SQLite (`CONVERSATION_DB_PATH`) persists chat and explicit size/color/language
+preferences across restarts. In both modes preferences require a supporting quote from the current
 customer message; invented evidence is rejected. Memory is isolated by merchant,
 channel and sender; identities across channels are not assumed to be the same person.
 
@@ -71,7 +78,7 @@ or continuing the chat does not refresh its timestamp. Product/lead observations
 expire. Inactive conversation records expire after 20 days. Cleanup runs at startup,
 every 60 seconds while running, and before every store operation; expired data is
 never supplied to the model. If the service is off, physical cleanup resumes on
-startup. SQLite secure deletion is enabled. Independently managed backups must use
+startup. SQLite secure deletion is enabled locally; Postgres uses row deletion and normal vacuum/WAL lifecycle. Independently managed backups must use
 the same retention policy.
 
 The model receives at most 20 recent messages and 12,000 history characters plus
@@ -98,16 +105,38 @@ moderator or a guarantee against every language, paraphrase or adversarial bypas
 
 ## Catalog storage and compatibility
 
-Products support persistent `upsert` by SKU. Descriptions are preserved on retrieval.
+When `DATABASE_URL` is configured, products come directly from the backend's
+`Product` table; Gemini embeddings are stored in `ai.product_embedding`. Changed
+products refresh their embeddings; keyword search is used if embeddings are unavailable.
+`POST /api/v1/catalog/reindex?brand_id=...` refreshes embeddings. Product writes to
+this service return 409 in cloud mode; edit through the seller dashboard.
+
+In local Chroma mode, products support persistent `upsert` by SKU. Descriptions are preserved on retrieval.
 Collection names now hash the exact brand ID, preventing punctuation, case and
 truncation collisions. Existing legacy `catalog_*` collections are left untouched;
 re-ingest each merchant's source catalog through `/catalog/product` into `catalog_v2_*`
 before switching traffic. Automatic migration cannot safely infer the original
 merchant from the old lossy collection name.
 
-The existing embedding function is a lightweight word-hashing baseline, not a trained
-semantic embedding model. Retrieval quality and model handoff judgments still need
+The local Chroma embedding function is a lightweight word-hashing baseline; cloud
+pgvector uses `EMBEDDING_MODEL` (default `gemini-embedding-001`). Retrieval quality and model handoff judgments still need
 real merchant examples and evaluation before production rollout.
+
+## Backend catalog and playbook compatibility
+
+The remote catalog-playbooks branch is integrated: requests can carry `business`,
+`playbook`, `offerings`, `goal_state`, and `recent_messages`. Supplied offerings are
+authoritative for that request; this path does not query an unrelated product catalog.
+Both paths enforce the same safety, 20-day memory, queue and AI-pause policy.
+Responses include `action`, `offering_ids`, and `collected_fields` for backend compatibility.
+Unknown prices/links route to humans. Collected fields must appear in the current
+customer message. CREATE_LEAD suggestions become human handoff, never an automatic
+order or booking action. Provider failure also hands off instead of claiming a DM was sent.
+
+Untimestamped external `recent_messages` and `goal_state` are accepted for compatibility
+but not forwarded to the model, since they cannot enforce the agreed retention period.
+The service uses its own retained conversation context. Backend-selected offering IDs
+are returned to the caller; customer identity across channels is not merged.
 
 ## Validation and observability
 
@@ -118,3 +147,8 @@ Successful model calls log elapsed time and input/output token usage without cus
 text. Pricing is not hardcoded; use measured tokens and the chosen model's pricing to
 set a monthly budget. The provider timeout defaults to 15 seconds per attempt, with
 at most two attempts. This is not an end-to-end response-time guarantee.
+
+Postgres integration tests require an isolated `TEST_DATABASE_URL` containing the
+backend schema. They modify test records and must never target a production database.
+Without it, those tests are skipped; unit tests still exercise auth, SQL adaptation,
+catalog validation, local persistence and the handoff lifecycle.

@@ -66,7 +66,7 @@ class GeminiEmbedder:
                 vectors.append([x / norm for x in e.values])
             return vectors
         except Exception as e:
-            logger.error(f"Embedding request failed: {e}")
+            logger.error("Embedding request failed: %s", type(e).__name__)
             return None
 
 
@@ -213,7 +213,7 @@ class PgCatalogStore:
                 vectors = self._embedder.embed(
                     [product_text(_row_to_product(r[2:])) for r in rows], "RETRIEVAL_DOCUMENT"
                 )
-                if not vectors:
+                if not vectors or len(vectors) != len(rows) or any(len(v) != settings.EMBEDDING_DIM for v in vectors):
                     break
                 with conn.transaction():
                     for r, vec in zip(rows, vectors):
@@ -222,6 +222,7 @@ class PgCatalogStore:
                             INSERT INTO ai.product_embedding (product_id, org_id, product_updated_at, model, embedding)
                             VALUES (%s, %s, %s, %s, %s::vector)
                             ON CONFLICT (product_id) DO UPDATE SET
+                                org_id = EXCLUDED.org_id,
                                 product_updated_at = EXCLUDED.product_updated_at,
                                 model = EXCLUDED.model,
                                 embedding = EXCLUDED.embedding,
@@ -263,11 +264,12 @@ class PgCatalogStore:
                         SELECT {PRODUCT_COLUMNS}
                         FROM ai.product_embedding e
                         JOIN "Product" p ON p.id = e.product_id
-                        WHERE e.org_id = %s AND e.model = %s
+                        WHERE e.org_id = %s AND p."orgId" = %s AND e.model = %s
+                          AND e.product_updated_at = p."updatedAt"
                         ORDER BY e.embedding <=> %s::vector
                         LIMIT %s
                         """,
-                        (brand_id, settings.EMBEDDING_MODEL, _vector_literal(qvec[0]), limit),
+                        (brand_id, brand_id, settings.EMBEDDING_MODEL, _vector_literal(qvec[0]), limit),
                     ).fetchall()
                 if rows:
                     return [_row_to_product(r) for r in rows]

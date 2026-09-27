@@ -6,12 +6,12 @@ class Settings(BaseSettings):
     DEFAULT_MODEL: str = "gemini-3.6-flash"
     # Supabase Postgres (the same database the backend uses). When set, product
     # search reads the backend's "Product" table and keeps pgvector embeddings in
-    # the "ai" schema. When empty, an in-memory catalog is used (local dev, tests).
+    # the "ai" schema. When empty, persistent Chroma/SQLite are used locally.
     CHROMA_PERSIST_DIR: str = "./chroma_db"
     DATABASE_URL: str = ""
     EMBEDDING_MODEL: str = "gemini-embedding-001"
-    EMBEDDING_DIM: int = 768
-    # Shared secret the backend sends as X-AI-Service-Token. Empty disables the check.
+    EMBEDDING_DIM: int = Field(default=768, ge=1, le=3072)
+    # Shared secret from the trusted backend; per-brand SERVICE_API_KEYS also work.
     AI_SERVICE_TOKEN: str = ""
     ENVIRONMENT: str = "development"
     HOST: str = "0.0.0.0"

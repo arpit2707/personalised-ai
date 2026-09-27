@@ -23,6 +23,12 @@ class ConversationStore:
 
     @contextmanager
     def db(self):
+        if settings.DATABASE_URL and self.path is None:
+            from app.services.pg_conversations import pg_conversations
+            with pg_conversations.transaction() as conn:
+                self._purge(conn)
+                yield conn
+            return
         path = self.path or settings.CONVERSATION_DB_PATH
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path, timeout=30)
