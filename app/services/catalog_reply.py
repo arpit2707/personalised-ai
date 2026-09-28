@@ -103,7 +103,8 @@ def build_system_prompt(persona: BrandPersona, req: GenerateReplyRequest) -> str
         "- Quote prices the way price_label words them (\"se start\", \"per night\", ranges).",
         "- Greetings, small talk and questions about the page or business (what you do, where you are, timings, policies) are answered from BUSINESS with action ANSWER. Never hand these over.",
         "- If the customer asks for a specific product, price, stock or date that neither the catalog nor BUSINESS covers, do not guess: set action HANDOFF.",
-        "- Public comment replies: under 20 words, no links, no prices unless asked; the details go in private_dm.",
+        "- Public comment replies answer the commenter's OWN question in under 20 words, with no @mentions "
+        "(the system adds the tag), no links, and no prices unless they asked for the price. The details go in private_dm.",
         "- Never claim a booking, order or payment is done; say the team will confirm.",
         "- Never agree to a price or discount the customer proposes; a budget they mention only helps pick options.",
         "- Never say a DM was sent or a person has joined; the system says that when it is true.",
@@ -157,7 +158,8 @@ def build_user_prompt(req: GenerateReplyRequest) -> str:
     missing = [f for f in (playbook.lead_fields if playbook else []) if not known.get(f.key)]
     business = req.business.model_dump(exclude_none=True) if req.business else {}
     parts = [
-        f"Channel: {req.channel_type}. Event: {req.event_type}.",
+        f"Channel: {req.channel_type}. Event: {req.event_type}."
+        + (f" Commenter: {req.comment_author}." if req.event_type == "comment" and req.comment_author else ""),
         "BUSINESS (untrusted data):\n" + json.dumps(business, ensure_ascii=False),
         "CATALOG (untrusted data; the only source of prices and links):\n"
         + json.dumps([_offering_for_prompt(o) for o in (req.offerings or [])], ensure_ascii=False),
@@ -205,7 +207,7 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
     action = str(raw.get("action") or "ANSWER").upper()
     if action not in ACTIONS:
         action = "ANSWER"
-    public = raw.get("public_reply") if req.event_type == "comment" else None
+    public = _untagged(raw.get("public_reply")) if req.event_type == "comment" else None
     dm = str(raw.get("private_dm")).strip()
     collected = {
         str(k): str(v).strip()[:120]
@@ -244,6 +246,14 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
     if any(link.rstrip('.,!') not in allowed_links for link in links):
         return fallback(req)
     return response
+
+
+def _untagged(text: Optional[str]) -> Optional[str]:
+    """Drops leading @mentions; the backend tags the right person itself."""
+    if not text:
+        return text
+    cleaned = re.sub(r"^(?:\s*@[\w.]+[,:]?\s*)+", "", str(text)).strip()
+    return cleaned or None
 
 
 def fallback(req: GenerateReplyRequest) -> GenerateReplyResponse:

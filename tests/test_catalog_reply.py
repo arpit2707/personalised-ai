@@ -179,3 +179,19 @@ def test_prompt_answers_page_questions_instead_of_handing_over():
     req = GenerateReplyRequest(**{**MAKEUP, "offerings": []})
     system = catalog_reply.build_system_prompt(BrandPersona(brand_name="Glam"), req)
     assert "Greetings, small talk and questions about the page" in system
+
+
+def test_public_comment_reply_loses_model_mentions(monkeypatch):
+    data = post({**MAKEUP, "comment_author": "priya_sharma"}, {
+        "public_reply": "@priya_sharma Haan, hair styling included hai!",
+        "private_dm": "Bridal full look ₹18,000 se start.",
+        "action": "ANSWER",
+    }, monkeypatch)
+    assert data["public_reply"] == "Haan, hair styling included hai!"
+
+
+def test_prompt_names_the_commenter_and_asks_for_no_tag():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    req = GenerateReplyRequest.model_validate({**MAKEUP, "comment_author": "priya_sharma"})
+    assert "Commenter: priya_sharma" in catalog_reply.build_user_prompt(req)
+    assert "no @mentions" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), req)

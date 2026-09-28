@@ -116,6 +116,9 @@ class GenerateReplyRequest(BaseModel):
     offerings: Optional[List[OfferingContext]] = Field(default=None, max_length=30)
     goal_state: Optional[Dict[str, Any]] = None
     recent_messages: List[RecentMessage] = Field(default_factory=list, max_length=20)
+    # Public comment replies: the backend puts the @tag in front itself, so the
+    # model only needs the name to know who it is answering.
+    comment_author: Optional[str] = Field(default=None, max_length=100)
     # The Reel2Real backend keeps its own hand-off pause and only calls when the
     # seller wants the AI to answer, so it asks to reopen a chat no agent has
     # claimed. Other callers keep the queue until an agent releases it.
