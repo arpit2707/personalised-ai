@@ -44,12 +44,20 @@ SAFETY_INSTRUCTION = (
 # Broad topic exclusion is intentional, including otherwise benign mentions.
 _BLOCKED = re.compile(
     r"\b(?:sex(?:ual\w*)?|porn\w*|nude\w*|nudity|erotic\w*|rape|rapist\w*|"
-    r"racial\w*|racis\w*|race|ethnic\w*|supremac\w*|"
+    r"racial\w*|racis\w*|ethnic\w*|supremac\w*|"
     r"harass\w*|harras\w*|bully\w*|bullying|molest\w*|"
     r"chemic\w*|poison\w*|posion\w*|toxic\w*|toxin\w*|cyanide|arsenic|"
     r"terror\w*|bomb\w*|explosive\w*|"
     r"zeher|zehar|zahar|jeher|aatank\w*|atank\w*|nasl\w*)\b"
     r"|\u092f\u094c\u0928|\u0905\u0936\u094d\u0932\u0940\u0932|\u0928\u0938\u094d\u0932|\u0909\u0924\u094d\u092a\u0940\u0921\u093c\u0928|\u0930\u0938\u093e\u092f\u0928|\u0930\u093e\u0938\u093e\u092f\u0928\u093f\u0915|\u091c\u093c?\u0939\u0930|\u0906\u0924\u0902\u0915",
+    re.IGNORECASE,
+)
+
+
+# Selling phrases, not the topics the filter exists for.
+_BENIGN = re.compile(
+    r"\b(?:chemical|chemicals|toxin|toxic|paraben|sulphate|sulfate)[\s-]*free\b"
+    r"|\bnon[\s-]*(?:toxic|chemical)\b|\bno\s+(?:harsh\s+)?(?:chemicals?|toxins?)\b",
     re.IGNORECASE,
 )
 
@@ -64,4 +72,4 @@ def contains_blocked_content(value):
         return False
     normalized = unicodedata.normalize("NFKC", value).casefold()
     normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")
-    return bool(_BLOCKED.search(normalized))
+    return bool(_BLOCKED.search(_BENIGN.sub(" ", normalized)))

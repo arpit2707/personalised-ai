@@ -75,6 +75,11 @@ class OfferingContext(BaseModel):
     includes: List[str] = Field(default_factory=list)
     linked_to_post: bool = False
     availability: Optional[List[OfferingAvailability]] = None
+    # Why the backend picked it: post (shown in the post the customer is asking
+    # about), chat (talked about earlier), search (matches this message),
+    # spotlight (a post the seller highlights for DMs) or overview (background
+    # for an open question; no prices until the customer narrows down).
+    match: Optional[Literal["post", "chat", "search", "spotlight", "overview"]] = None
 
 class LeadField(BaseModel):
     key: str
@@ -95,6 +100,19 @@ class BusinessContext(BaseModel):
     hours: Optional[str] = None
     policies: Optional[Dict[str, str]] = None
     faqs: List[Dict[str, str]] = Field(default_factory=list)
+    # What the page sells: PRODUCTS, SERVICES or BOTH; categories are examples
+    # for an open question ("bridal makeup, party makeup, hair").
+    offer_type: Optional[Literal["PRODUCTS", "SERVICES", "BOTH"]] = None
+    categories: List[str] = Field(default_factory=list, max_length=30)
+
+class SpotlightPost(BaseModel):
+    """A post the seller highlights in plain DMs (AI-on posts only)."""
+    post_id: str = Field(max_length=128)
+    label: Optional[str] = Field(default=None, max_length=120)
+    caption: Optional[str] = Field(default=None, max_length=500)
+    permalink: Optional[str] = Field(default=None, max_length=500)
+    offering_ids: List[str] = Field(default_factory=list, max_length=10)
+
 
 class RecentMessage(BaseModel):
     # "from" is a Python keyword, so the attribute is `sender`.
@@ -116,6 +134,12 @@ class GenerateReplyRequest(BaseModel):
     offerings: Optional[List[OfferingContext]] = Field(default=None, max_length=30)
     goal_state: Optional[Dict[str, Any]] = None
     recent_messages: List[RecentMessage] = Field(default_factory=list, max_length=20)
+    spotlight: List[SpotlightPost] = Field(default_factory=list, max_length=5)
+    # Links the reply may contain besides item links (Spotlight permalinks).
+    allowed_links: List[str] = Field(default_factory=list, max_length=20)
+    # Public comment replies: the backend puts the @tag in front itself, so the
+    # model only needs the name to know who it is answering.
+    comment_author: Optional[str] = Field(default=None, max_length=100)
     # The Reel2Real backend keeps its own hand-off pause and only calls when the
     # seller wants the AI to answer, so it asks to reopen a chat no agent has
     # claimed. Other callers keep the queue until an agent releases it.
@@ -136,6 +160,8 @@ class GenerateReplyResponse(BaseModel):
     conversation_status: Literal["ai", "pending", "active"] = "ai"
     handoff_reason: Optional[str] = None
     lead_interested: bool = False
+    # PRODUCTS or SERVICES once the customer has made clear which they want.
+    offering_type: Optional[str] = None
 
 
 class PreferenceEvidence(BaseModel):
@@ -159,6 +185,8 @@ class ModelReply(BaseModel):
     previous_answer_unresolved: bool = False
     buying_interest: bool = False
     preferences: List[PreferenceEvidence] = Field(default_factory=list, max_length=3)
+    # What the customer turned out to want on a page that sells both.
+    offering_type: Optional[Literal["PRODUCTS", "SERVICES"]] = None
 
 
 class CollectedField(BaseModel):

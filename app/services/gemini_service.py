@@ -27,10 +27,14 @@ class GeminiService:
     def __init__(self):
         self._client = None
 
-    def generate(self, system_instruction: str, user_prompt: str) -> dict:
+    def generate(self, system_instruction: str, user_prompt: str, customer_text: str = None) -> dict:
         refusal = {"public_reply": SAFETY_REFUSAL, "private_dm": SAFETY_REFUSAL,
                    "intent": "safety_refusal", "reasoning": None}
-        if contains_blocked_content([system_instruction, user_prompt]):
+        # Callers that pass the customer's own words have the filter applied to
+        # those only, so seller text such as a "chemical-free" catalog item or
+        # caption does not block every reply on that page.
+        checked = customer_text if customer_text is not None else [system_instruction, user_prompt]
+        if contains_blocked_content(checked):
             return refusal
         if not settings.GEMINI_API_KEY:
             raise LLMUnavailable("Generation is not configured")

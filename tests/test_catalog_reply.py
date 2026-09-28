@@ -105,12 +105,16 @@ def test_empty_catalog_still_answers_about_the_business(monkeypatch):
     assert "Patna" in data["private_dm"]
 
 
-def test_empty_catalog_without_business_info_hands_over(monkeypatch):
-    def model(*_):
-        raise AssertionError("Should not generate")
+def test_empty_catalog_without_business_info_asks_an_open_question(monkeypatch):
+    seen = {}
+
+    def model(system, prompt, *_):
+        seen["prompt"] = prompt
+        return {"private_dm": "Hi! Aap kya dhoondh rahe hain?", "intent": "general", "action": "ANSWER"}
     monkeypatch.setattr(gemini_service, "generate", model)
-    res = client.post("/api/v1/generate-reply", json={**MAKEUP, "offerings": []})
-    assert res.json()["action"] == "HANDOFF"
+    data = client.post("/api/v1/generate-reply", json={**MAKEUP, "event_type": "dm", "offerings": []}).json()
+    assert data["action"] == "ANSWER"
+    assert data["private_dm"] == "Hi! Aap kya dhoondh rahe hain?"
 
 
 def test_prompt_answers_greetings_from_business_info():
@@ -175,3 +179,75 @@ def test_prompt_answers_page_questions_instead_of_handing_over():
     req = GenerateReplyRequest(**{**MAKEUP, "offerings": []})
     system = catalog_reply.build_system_prompt(BrandPersona(brand_name="Glam"), req)
     assert "Greetings, small talk and questions about the page" in system
+
+
+def test_public_comment_reply_loses_model_mentions(monkeypatch):
+    data = post({**MAKEUP, "comment_author": "priya_sharma"}, {
+        "public_reply": "@priya_sharma Haan, hair styling included hai!",
+        "private_dm": "Bridal full look ₹18,000 se start.",
+        "action": "ANSWER",
+    }, monkeypatch)
+    assert data["public_reply"] == "Haan, hair styling included hai!"
+
+
+def test_prompt_names_the_commenter_and_asks_for_no_tag():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    req = GenerateReplyRequest.model_validate({**MAKEUP, "comment_author": "priya_sharma"})
+    assert "Commenter: priya_sharma" in catalog_reply.build_user_prompt(req)
+    assert "no @mentions" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), req)
+
+
+def test_post_item_rule_and_match_reach_the_prompt():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    offering = {**MAKEUP["offerings"][0], "linked_to_post": False, "match": "post"}
+    req = GenerateReplyRequest.model_validate({**MAKEUP, "offerings": [offering]})
+    assert '"shown_in_this_post": true' in catalog_reply.build_user_prompt(req)
+    assert "mean that item" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), req)
+    chat = GenerateReplyRequest.model_validate({**MAKEUP, "offerings": [{**offering, "match": "chat"}]})
+    assert '"why_listed": "chat"' in catalog_reply.build_user_prompt(chat)
+
+
+def test_discovery_and_offer_type_rules():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    both = GenerateReplyRequest.model_validate({
+        **MAKEUP, "event_type": "dm",
+        "business": {**MAKEUP["business"], "offer_type": "BOTH", "categories": ["Bridal makeup", "Lehenga"]},
+        "goal_state": {"stage": "DISCOVER", "fields": {}},
+    })
+    system = catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), both)
+    assert "product chahiye ya service?" in system
+    assert "No prices yet" in system
+    prompt = catalog_reply.build_user_prompt(both)
+    assert '"categories": ["Bridal makeup", "Lehenga"]' in prompt
+    assert '"stage": "DISCOVER"' in prompt
+    services = GenerateReplyRequest.model_validate({**MAKEUP, "business": {**MAKEUP["business"], "offer_type": "SERVICES"}})
+    assert "Hum services dete hain" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), services)
+
+
+def test_offering_type_comes_back(monkeypatch):
+    data = post({**MAKEUP, "event_type": "dm"}, {
+        "private_dm": "Bridal full look ₹18,000 se start.", "action": "ANSWER", "offering_type": "SERVICES",
+    }, monkeypatch)
+    assert data["offering_type"] == "SERVICES"
+
+
+SPOT = {"post_id": "ig_9", "label": "Diwali bridal offer", "permalink": "https://instagram.com/p/abc",
+        "caption": "Bridal looks for Diwali", "offering_ids": ["off_bridal"]}
+
+
+def test_spotlight_reaches_the_prompt():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    req = GenerateReplyRequest.model_validate({**MAKEUP, "event_type": "dm", "spotlight": [SPOT]})
+    prompt = catalog_reply.build_user_prompt(req)
+    assert "Diwali bridal offer" in prompt
+    assert "https://instagram.com/p/abc" in prompt
+    assert "SPOTLIGHT lists the posts" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), req)
+
+
+def test_spotlight_link_is_allowed_other_links_are_not(monkeypatch):
+    ok = post({**MAKEUP, "event_type": "dm", "spotlight": [SPOT]}, {
+        "private_dm": "Ye dekhiye: https://instagram.com/p/abc", "action": "ANSWER"}, monkeypatch)
+    assert "https://instagram.com/p/abc" in ok["private_dm"]
+    bad = post({**MAKEUP, "event_type": "dm", "sender_id": "u2", "spotlight": [SPOT]}, {
+        "private_dm": "Ye dekhiye: https://instagram.com/p/other", "action": "ANSWER"}, monkeypatch)
+    assert "other" not in (bad["private_dm"] or "")

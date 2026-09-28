@@ -37,8 +37,11 @@ def test_postgres_translation_leaves_customer_values_untouched():
     assert '::text IS NULL' in postgres_sql('UPDATE conversations SET product_at=CASE WHEN ? IS NULL THEN product_at ELSE ? END')
 
 
-def test_customer_suggested_price_does_not_authorize_discount():
-    assert catalog_reply.unknown_prices('INR 99', [100], 'give it for INR 99') == [99]
+def test_customer_written_amount_is_allowed_but_others_are_not():
+    # "₹5000 budget hai": repeating the customer's own number is fine (the
+    # prompt forbids agreeing to it as a price); any other amount is blocked.
+    assert catalog_reply.unknown_prices('Aapke INR 5000 budget me', [100], 'budget INR 5000') == []
+    assert catalog_reply.unknown_prices('INR 99 only', [100], 'budget INR 5000') == [99]
 
 
 def test_offerings_do_not_bypass_memory_pause_or_safety(monkeypatch):
@@ -50,7 +53,7 @@ def test_offerings_do_not_bypass_memory_pause_or_safety(monkeypatch):
     assert client.post('/api/v1/generate-reply', json={**payload, 'message_text': 'human please'}).json()['conversation_status'] == 'pending'
     assert client.post('/api/v1/generate-reply', json=payload).json()['private_dm'] is None
     assert model.call_count == 1
-    response = client.post('/api/v1/generate-reply', json={**payload, 'message_text': 'chemical-free?'}).json()
+    response = client.post('/api/v1/generate-reply', json={**payload, 'message_text': 'poison?'}).json()
     assert response['intent'] == 'safety_refusal'
 
 

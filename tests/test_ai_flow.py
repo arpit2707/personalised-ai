@@ -50,7 +50,8 @@ def test_negative_sentiment_guardrail():
     data = res.json()
     assert data["requires_human_attention"] is True
     assert data["sentiment"] == "negative"
-    assert "apologize" in data["private_dm"].lower()
+    assert "sorry" in data["private_dm"].lower()
+    assert "queue" not in data["private_dm"].lower()
 
 def test_price_inquiry_reply_generation():
     test_catalog_upsert_and_search()

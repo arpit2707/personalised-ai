@@ -5,7 +5,7 @@ from app.services.gemini_service import GeminiService
 
 
 @pytest.mark.parametrize("text", [
-    "sexual content", "racial jokes", "harassment", "chemical-free",
+    "sexual content", "racial jokes", "harassment", "chemical weapon",
     "poison", "posionous", "terrorism", "zeher", "\u091c\u0939\u0930", "SEXUAL",
     "\uff50\uff4f\uff49\uff53\uff4f\uff4e", "poi\u200bson", "refund for poison",
 ])
@@ -13,7 +13,9 @@ def test_blocked_topics(text):
     assert contains_blocked_content(text)
 
 
-@pytest.mark.parametrize("text", ["shirt price?", "silk kurta", "size M available?", "refund please"])
+@pytest.mark.parametrize("text", ["shirt price?", "silk kurta", "size M available?", "refund please",
+                                  "chemical-free shampoo", "non-toxic toys", "paraben free cream",
+                                  "race day running shoes", "no harsh chemicals"])
 def test_normal_shopping(text):
     assert not contains_blocked_content(text)
 
