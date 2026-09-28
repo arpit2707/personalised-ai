@@ -100,6 +100,10 @@ class BusinessContext(BaseModel):
     hours: Optional[str] = None
     policies: Optional[Dict[str, str]] = None
     faqs: List[Dict[str, str]] = Field(default_factory=list)
+    # What the page sells: PRODUCTS, SERVICES or BOTH; categories are examples
+    # for an open question ("bridal makeup, party makeup, hair").
+    offer_type: Optional[Literal["PRODUCTS", "SERVICES", "BOTH"]] = None
+    categories: List[str] = Field(default_factory=list, max_length=30)
 
 class RecentMessage(BaseModel):
     # "from" is a Python keyword, so the attribute is `sender`.
@@ -169,6 +173,8 @@ class ModelReply(BaseModel):
     previous_answer_unresolved: bool = False
     buying_interest: bool = False
     preferences: List[PreferenceEvidence] = Field(default_factory=list, max_length=3)
+    # What the customer turned out to want on a page that sells both.
+    offering_type: Optional[Literal["PRODUCTS", "SERVICES"]] = None
 
 
 class CollectedField(BaseModel):

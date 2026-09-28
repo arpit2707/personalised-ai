@@ -121,6 +121,24 @@ def build_system_prompt(persona: BrandPersona, req: GenerateReplyRequest) -> str
         "then ask which one they like.",
         "- \"The red one from the post\" and similar: use an item only when exactly one fits; otherwise ask which one.",
     ]
+    lines += [
+        "",
+        "DISCOVERY (plain chats without a post):",
+        "- When the customer has not said what they want yet (\"hi\", \"price list\", \"kya naya hai\") and no item came "
+        "from a post or earlier chat: greet, ask an open question (\"Aap kya dhoondh rahe hain?\") and give at most two "
+        "examples from SPOTLIGHT labels or CATEGORIES. No prices yet.",
+        "- Items listed with why_listed \"overview\" are background only: name them as examples, give prices once the "
+        "customer picks a category or item. Then show 2 to 4 matching items with prices.",
+        "- Once they pick an item, collect the STILL NEEDED details one or two at a time; CREATE_LEAD when nothing is missing.",
+    ]
+    offer_type = business.offer_type if business else None
+    if offer_type == "PRODUCTS":
+        lines.append("- This page sells products only. If asked for a service, say so kindly and offer the real products.")
+    elif offer_type == "SERVICES":
+        lines.append("- This page offers services only. If asked for a product, say \"Hum services dete hain\" and offer the real services.")
+    elif offer_type == "BOTH":
+        lines.append("- This page sells products and services. If it is not clear which the customer wants, ask "
+                     "\"product chahiye ya service?\" before listing items. Set offering_type once it is clear.")
     if playbook and playbook.rules:
         lines.append("Industry rules:")
         lines += [f"- {r}" for r in playbook.rules]
@@ -183,6 +201,11 @@ def build_user_prompt(req: GenerateReplyRequest) -> str:
         parts.append("EARLIER IN THIS CHAT (untrusted):\n" + "\n".join(f"{m.sender}: {m.text}" for m in req.recent_messages))
     if known:
         parts.append("ALREADY KNOWN (do not ask again): " + json.dumps(known, ensure_ascii=False))
+    stage = goal_state.get("stage")
+    wants = goal_state.get("offeringType")
+    if stage or wants:
+        parts.append("CONVERSATION STAGE: " + json.dumps({k: v for k, v in (("stage", stage), ("customer_wants", wants)) if v},
+                                                        ensure_ascii=False))
     if missing:
         parts.append("STILL NEEDED for a lead (ask for at most two, using these questions): "
                      + json.dumps([{"key": f.key, "ask": f.ask} for f in missing], ensure_ascii=False))
@@ -194,6 +217,7 @@ def build_user_prompt(req: GenerateReplyRequest) -> str:
         '"action": "SEND_LINK | ASK_FIELD | CREATE_LEAD | HANDOFF | ANSWER", '
         '"offering_ids": [catalog ids you talked about], '
         '"collected_fields": {key: value} for STILL NEEDED keys the customer just gave you (dates as YYYY-MM-DD when a full date is given), '
+        '"offering_type": "PRODUCTS" | "SERVICES" | null (what the customer wants, once clear), '
         '"reasoning": one short line}\n'
         "Use CREATE_LEAD when, after this message, nothing in STILL NEEDED is missing."
     )
@@ -221,7 +245,9 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
         if k in lead_keys and isinstance(v, (str, int, float)) and str(v).strip()
         and str(v).strip().casefold() in req.message_text.casefold()
     }
+    offering_type = raw.get("offering_type") if raw.get("offering_type") in ("PRODUCTS", "SERVICES") else None
     response = GenerateReplyResponse(
+        offering_type=offering_type,
         public_reply=public,
         private_dm=dm,
         intent=str(raw.get("intent") or "general")[:64],

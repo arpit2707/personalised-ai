@@ -205,3 +205,27 @@ def test_post_item_rule_and_match_reach_the_prompt():
     assert "mean that item" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), req)
     chat = GenerateReplyRequest.model_validate({**MAKEUP, "offerings": [{**offering, "match": "chat"}]})
     assert '"why_listed": "chat"' in catalog_reply.build_user_prompt(chat)
+
+
+def test_discovery_and_offer_type_rules():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    both = GenerateReplyRequest.model_validate({
+        **MAKEUP, "event_type": "dm",
+        "business": {**MAKEUP["business"], "offer_type": "BOTH", "categories": ["Bridal makeup", "Lehenga"]},
+        "goal_state": {"stage": "DISCOVER", "fields": {}},
+    })
+    system = catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), both)
+    assert "product chahiye ya service?" in system
+    assert "No prices yet" in system
+    prompt = catalog_reply.build_user_prompt(both)
+    assert '"categories": ["Bridal makeup", "Lehenga"]' in prompt
+    assert '"stage": "DISCOVER"' in prompt
+    services = GenerateReplyRequest.model_validate({**MAKEUP, "business": {**MAKEUP["business"], "offer_type": "SERVICES"}})
+    assert "Hum services dete hain" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), services)
+
+
+def test_offering_type_comes_back(monkeypatch):
+    data = post({**MAKEUP, "event_type": "dm"}, {
+        "private_dm": "Bridal full look ₹18,000 se start.", "action": "ANSWER", "offering_type": "SERVICES",
+    }, monkeypatch)
+    assert data["offering_type"] == "SERVICES"
