@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.handoff_texts import PAUSING_REASONS, handoff_text, soft_texts
 
 
 class ConversationConflict(Exception):
@@ -126,7 +127,8 @@ class ConversationStore:
             count = row['unresolved'] + 1 if unresolved else 0
             if count >= 2 and reason is None:
                 reason = 'unresolved_query'
-            status = 'pending' if reason else 'ai'
+            # Soft reasons ("the team will confirm this") keep the AI answering.
+            status = 'pending' if reason in PAUSING_REASONS else 'ai'
             priority = 'high' if reason == 'purchase_assistance' else 'normal'
             db.execute('''UPDATE conversations SET status=?, reason=?, priority=?, unresolved=?,
                        product=COALESCE(?,product), product_at=CASE WHEN ? IS NULL THEN product_at ELSE ? END,
@@ -141,17 +143,33 @@ class ConversationStore:
                 db.execute('''INSERT INTO preferences VALUES(?,?,?,?) ON CONFLICT(conversation,key)
                            DO UPDATE SET value=excluded.value,created=excluded.created''',
                            (cid, pref['key'], pref['value'], now))
-            if reason:
-                reply = self.handoff_text(reason)
+            if reason and not (reply and reason == 'crisis'):
+                reply = handoff_text(reason, source_text)
+                if reason not in PAUSING_REASONS:
+                    last = db.execute("SELECT text FROM messages WHERE conversation=? AND role='assistant' "
+                                      "ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
+                    # The same "team will confirm" line twice in a row reads like a bot stuck in a loop.
+                    if last and last['text'] in soft_texts(reason):
+                        reply = None
             if reply:
                 db.execute("INSERT INTO messages(conversation,role,text,created) VALUES(?,?,?,?)",
                            (cid, 'assistant', reply, now))
             return self._row(db, brand, cid), reply
 
     @staticmethod
-    def handoff_text(reason):
-        prefix = "I apologize for the trouble. " if reason in ('complaint', 'order_support') else ''
-        return prefix + "Your conversation is in the team's queue for review. An agent has not joined yet."
+    def handoff_text(reason, customer_text=''):
+        return handoff_text(reason, customer_text)
+
+    def mark_crisis(self, brand, snapshot, reply):
+        """Pauses the chat for the seller whatever state it was in, and records the helpline once."""
+        now = self.clock()
+        cid = snapshot['id']
+        with self.db() as db:
+            db.execute("UPDATE conversations SET status='pending', reason='crisis', priority='high', "
+                       "updated=?, version=version+1 WHERE id=?", (now, cid))
+            db.execute("INSERT INTO messages(conversation,role,text,created) VALUES(?,?,?,?)",
+                       (cid, 'assistant', reply, now))
+            return self._row(db, brand, cid)
 
     def detail(self, brand, cid):
         with self.db() as db:

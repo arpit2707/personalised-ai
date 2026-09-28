@@ -136,6 +136,8 @@ class GenerateReplyResponse(BaseModel):
     conversation_status: Literal["ai", "pending", "active"] = "ai"
     handoff_reason: Optional[str] = None
     lead_interested: bool = False
+    # PRODUCTS or SERVICES once the customer has made clear which they want.
+    offering_type: Optional[str] = None
 
 
 class PreferenceEvidence(BaseModel):

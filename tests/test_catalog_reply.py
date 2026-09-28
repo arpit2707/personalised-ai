@@ -105,12 +105,16 @@ def test_empty_catalog_still_answers_about_the_business(monkeypatch):
     assert "Patna" in data["private_dm"]
 
 
-def test_empty_catalog_without_business_info_hands_over(monkeypatch):
-    def model(*_):
-        raise AssertionError("Should not generate")
+def test_empty_catalog_without_business_info_asks_an_open_question(monkeypatch):
+    seen = {}
+
+    def model(system, prompt, *_):
+        seen["prompt"] = prompt
+        return {"private_dm": "Hi! Aap kya dhoondh rahe hain?", "intent": "general", "action": "ANSWER"}
     monkeypatch.setattr(gemini_service, "generate", model)
-    res = client.post("/api/v1/generate-reply", json={**MAKEUP, "offerings": []})
-    assert res.json()["action"] == "HANDOFF"
+    data = client.post("/api/v1/generate-reply", json={**MAKEUP, "event_type": "dm", "offerings": []}).json()
+    assert data["action"] == "ANSWER"
+    assert data["private_dm"] == "Hi! Aap kya dhoondh rahe hain?"
 
 
 def test_prompt_answers_greetings_from_business_info():

@@ -29,7 +29,7 @@ def test_handoff_and_pause(text, reason, monkeypatch):
     first = send(text).json()
     assert first['conversation_status'] == 'pending'
     assert first['handoff_reason'] == reason
-    assert 'not joined' in first['private_dm']
+    assert first['private_dm'] and 'queue' not in first['private_dm']
     second = send('Hello again').json()
     assert second['conversation_id'] == first['conversation_id']
     assert second['private_dm'] is None
@@ -96,12 +96,17 @@ def test_bad_model_output_fails_closed(output, monkeypatch):
 def test_strict_safety_before_handoff_and_no_lead(monkeypatch):
     model = Mock(side_effect=AssertionError('Blocked input reached model'))
     monkeypatch.setattr(endpoints.gemini_service, 'generate', model)
-    for text in ['chemical-free shampoo price?', 'harassment complaint refund', 'poison']:
+    for text in ['harassment complaint refund', 'poison']:
         reply = send(text).json()
         assert reply['private_dm'] == SAFETY_REFUSAL
         assert reply['intent'] == 'safety_refusal'
         assert reply['conversation_id'] is None
     assert client.get('/api/v1/inbox').json() == []
+
+
+def test_selling_phrases_are_not_blocked(monkeypatch):
+    reply = send('chemical-free shampoo price?').json()
+    assert reply['intent'] != 'safety_refusal'
 
 
 def test_blocked_model_output_and_dm_channel(monkeypatch):
@@ -112,14 +117,14 @@ def test_blocked_model_output_and_dm_channel(monkeypatch):
 
 
 def test_memory_in_prompt_and_explicit_preferences(monkeypatch):
-    def first(system, prompt):
+    def first(system, prompt, *_):
         return {'private_dm': 'Noted.', 'preferences': [
             {'key': 'size', 'value': 'XL', 'evidence': 'I wear XL'},
             {'key': 'color', 'value': 'blue', 'evidence': 'I like blue'},
         ]}
     monkeypatch.setattr(endpoints.gemini_service, 'generate', first)
     cid = send('I wear XL').json()['conversation_id']
-    def second(system, prompt):
+    def second(system, prompt, *_):
         assert 'I wear XL' in prompt
         assert '"size": "XL"' in prompt
         assert '"color": "blue"' not in prompt

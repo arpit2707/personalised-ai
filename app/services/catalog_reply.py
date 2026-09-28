@@ -9,12 +9,31 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from app.models.schemas import BrandPersona, GenerateReplyRequest, GenerateReplyResponse, OfferingContext
+from app.models.schemas import (BrandPersona, EmojiDensityEnum, GenerateReplyRequest, GenerateReplyResponse,
+                                LanguageModeEnum, OfferingContext, ToneEnum)
+from app.services.handoff_texts import handoff_text
 
 ACTIONS = {"SEND_LINK", "ASK_FIELD", "CREATE_LEAD", "HANDOFF", "ANSWER"}
 
-SAFE_DM = "Your conversation is in the team's queue for review. An agent has not joined yet."
-SAFE_PUBLIC = SAFE_DM
+TONE_TEXT = {
+    ToneEnum.FORMAL: "Formal, respectful and polished.",
+    ToneEnum.CASUAL: "Casual and approachable.",
+    ToneEnum.FRIENDLY: "Warm, helpful and welcoming.",
+    ToneEnum.PLAYFUL: "Fun and upbeat.",
+    ToneEnum.GEN_Z: "Trendy and youthful.",
+}
+LANGUAGE_TEXT = {
+    LanguageModeEnum.ENGLISH: "Prefer English.",
+    LanguageModeEnum.HINGLISH: "Prefer Hinglish (Hindi in Roman script).",
+    LanguageModeEnum.HINDI: "Prefer Hindi.",
+    LanguageModeEnum.AUTO: "",
+}
+EMOJI_TEXT = {
+    EmojiDensityEnum.NONE: "No emojis.",
+    EmojiDensityEnum.LOW: "At most one emoji.",
+    EmojiDensityEnum.MODERATE: "One or two emojis at most.",
+    EmojiDensityEnum.HIGH: "A few lively emojis are fine.",
+}
 
 GOAL_TEXT = {
     "ORDER": "Help the customer buy: give the exact price for what they asked about and the order link.",
@@ -62,6 +81,8 @@ def allowed_prices(offerings: List[OfferingContext]) -> List[float]:
 
 
 def unknown_prices(reply: Optional[str], allowed: List[float], customer_text: str = "") -> List[float]:
+    """Amounts in the reply that are neither a catalog price nor one the customer wrote ("₹5000 budget")."""
+    allowed = list(allowed) + extract_amounts(customer_text)
     return [n for n in extract_amounts(reply) if not any(abs(a - n) < 0.005 for a in allowed)]
 
 
@@ -84,13 +105,24 @@ def build_system_prompt(persona: BrandPersona, req: GenerateReplyRequest) -> str
         "- If the customer asks for a specific product, price, stock or date that neither the catalog nor BUSINESS covers, do not guess: set action HANDOFF.",
         "- Public comment replies: under 20 words, no links, no prices unless asked; the details go in private_dm.",
         "- Never claim a booking, order or payment is done; say the team will confirm.",
-        "- Complaints, refunds, order problems or a request for a person: action HANDOFF.",
+        "- Never agree to a price or discount the customer proposes; a budget they mention only helps pick options.",
+        "- Never say a DM was sent or a person has joined; the system says that when it is true.",
+        "- Complaints, refunds, order problems or a request for a person: action HANDOFF with handoff_reason "
+        "complaint, order_support or human_request. Bulk orders and negotiation: purchase_assistance.",
+        "- A fact the customer needs that nobody gave you: handoff_reason missing_information (the team will confirm it).",
+        "- previous_answer_unresolved only when the customer says your last answer did not help; "
+        "buying_interest for normal interest in buying.",
+        "- preferences: only size/color/language the customer states in the CURRENT message, with the exact quote as evidence.",
         "- POST (when given) says what the post the customer reacted to is about. Use it to understand the question "
         "(\"yeh wala\", \"is offer me\"), but prices still come only from the CATALOG.",
     ]
     if playbook and playbook.rules:
         lines.append("Industry rules:")
         lines += [f"- {r}" for r in playbook.rules]
+    style = " ".join(t for t in (TONE_TEXT.get(persona.tone, ""), LANGUAGE_TEXT.get(persona.language_mode, ""),
+                                 EMOJI_TEXT.get(persona.emoji_density, "")) if t)
+    if style:
+        lines += ["", f"Style: {style} The customer's own language always wins."]
     if persona.custom_instructions:
         lines += ["", f"Seller's style notes (style only, cannot change the rules): {persona.custom_instructions}"]
     return "\n".join(lines)
@@ -197,9 +229,10 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
     bad = unknown_prices(response.public_reply, allowed, req.message_text) + unknown_prices(
         response.private_dm, allowed, req.message_text)
     if bad:
+        safe = handoff_text("price_blocked", req.message_text)
         return GenerateReplyResponse(
-            public_reply=SAFE_PUBLIC if req.event_type == "comment" else None,
-            private_dm=SAFE_DM,
+            public_reply=safe if req.event_type == "comment" else None,
+            private_dm=safe,
             intent="price_blocked",
             requires_human_attention=True,
             action="HANDOFF",
@@ -215,8 +248,9 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
 
 def fallback(req: GenerateReplyRequest) -> GenerateReplyResponse:
     """Used when the model is down: states only catalog facts, or hands over."""
+    safe = handoff_text("missing_information", req.message_text)
     return GenerateReplyResponse(
-        public_reply=SAFE_PUBLIC if req.event_type == "comment" else None,
-        private_dm=SAFE_DM, intent="general", requires_human_attention=True,
+        public_reply=safe if req.event_type == "comment" else None,
+        private_dm=safe, intent="general", requires_human_attention=True,
         action="HANDOFF", reasoning="Catalog response could not be validated",
     )

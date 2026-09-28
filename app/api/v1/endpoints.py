@@ -10,6 +10,8 @@ from app.services.gemini_service import gemini_service, LLMUnavailable
 from app.services.conversation_store import conversation_store, ConversationConflict
 from app.services.handoff_policy import handoff_reason, unresolved_feedback, interested
 from app.services import catalog_reply
+from app.services.crisis import is_crisis, crisis_reply, CRISIS_PUBLIC
+from app.services.handoff_texts import lead_confirmation, is_handoff_line
 import json
 
 router = APIRouter()
@@ -70,18 +72,26 @@ def complete(req, row, **kwargs):
 
 def handoff(req, row, reason, product=None):
     current, text = complete(req, row, reason=reason, product=product,
-                             interested=reason == 'purchase_assistance')
+                             interested=reason == 'purchase_assistance', source_text=req.message_text)
+    # Soft reasons keep the chat with the AI but still flag it for the seller.
+    state = {**state_fields(current), 'requires_human_attention': True}
     return GenerateReplyResponse(public_reply=text if req.event_type == 'comment' else None,
                                  private_dm=text, intent='human_handoff', action='HANDOFF',
                                  sentiment='negative' if reason in ('complaint', 'order_support') else 'neutral',
-                                 **state_fields(current))
+                                 **state)
 
 
 @router.post("/generate-reply", response_model=GenerateReplyResponse)
 def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated_brand)):
     require_brand(req.brand_id, brand)
+    # Crisis first, even before the safety filter: "zeher kha lungi" needs a
+    # helpline, not a refusal.
+    if is_crisis(req.message_text):
+        return crisis(req)
+    # Only what the customer wrote is filtered here; catalog text such as
+    # "chemical-free" is the seller's own and must not block a reply.
     # Refusals never enter sales memory or become a lead.
-    if contains_blocked_content(req.model_dump(mode="json")):
+    if contains_blocked_content(req.message_text):
         return safety_refusal(req)
     row = conversation_store.begin(req)
     if row['status'] != 'ai':
@@ -112,15 +122,11 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
     if target is None:
         matched = catalog_store.search_products(brand, req.message_text, limit=1)
         target = matched[0] if matched else None
-    if target and contains_blocked_content(target.model_dump(mode='json')):
-        return safety_refusal(req)
-    if contains_blocked_content(memory):
-        return safety_refusal(req)
     persona = req.brand_persona or BrandPersona(brand_name='Reel2Real Brand')
     user_prompt = prompt_assembler.build_user_prompt(
         req.message_text, req.channel_type, req.event_type, req.post_context, target, memory)
     try:
-        raw = gemini_service.generate(prompt_assembler.build_system_prompt(persona), user_prompt)
+        raw = gemini_service.generate(prompt_assembler.build_system_prompt(persona), user_prompt, req.message_text)
         if raw.get('intent') == 'safety_refusal' or contains_blocked_content(raw):
             return safety_refusal(req)
         output = ModelReply.model_validate(raw)
@@ -142,43 +148,59 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
                                  **state_fields(current))
 
 
+def crisis(req):
+    """Helplines once per chat, then the chat waits for the seller."""
+    row = conversation_store.begin(req)
+    if row['reason'] == 'crisis' and row['status'] != 'ai':
+        return paused(row)
+    text = crisis_reply(req.message_text)
+    current = conversation_store.mark_crisis(req.brand_id, row, text)
+    return GenerateReplyResponse(public_reply=CRISIS_PUBLIC if req.event_type == 'comment' else None,
+                                 private_dm=text, intent='crisis', action='HANDOFF',
+                                 **state_fields(current))
+
+
 def offering_reply(req, row, memory, failed):
     """Backend-picked offerings use the same safety, memory and handoff lifecycle.
 
-    An empty catalog still lets the model greet and answer questions about the
-    business from its description; it hands over itself when it needs the catalog,
-    or immediately if there is no business description either.
+    An empty catalog still lets the model greet, answer from the business
+    description and ask what the customer is looking for; it hands over itself
+    when it needs a fact nobody gave it.
     """
-    if not req.offerings and not (req.business and req.business.description):
-        return handoff(req, row, 'missing_information')
     persona = req.brand_persona or BrandPersona(brand_name='Reel2Real Brand')
-    if contains_blocked_content(memory):
-        return safety_refusal(req)
-    # Only our retained history has enforceable timestamps. Untimestamped external
-    # recent_messages/goal_state are accepted for wire compatibility, not memory.
-    context_req = req.model_copy(update={'recent_messages': [], 'goal_state': None})
-    system = catalog_reply.build_system_prompt(persona, context_req)
-    system += '\n' + prompt_assembler.build_system_prompt(persona)
-    prompt = catalog_reply.build_user_prompt(context_req)
+    # The backend's recent messages and goal state (fields collected, the post
+    # being discussed, the discovery stage) are part of the prompt; our own
+    # retained history is added below.
+    system = catalog_reply.build_system_prompt(persona, req)
+    prompt = catalog_reply.build_user_prompt(req)
+    if req.recent_messages:
+        # The backend's thread already carries the history (seller replies too).
+        memory = {**memory, 'history': []}
     prompt += '\nRetained conversation data:\n' + json.dumps(memory, ensure_ascii=False)
     try:
-        raw = gemini_service.generate(system, prompt)
+        raw = gemini_service.generate(system, prompt, req.message_text)
         if contains_blocked_content(raw) or raw.get('intent') == 'safety_refusal':
             return safety_refusal(req)
         output = ModelReply.model_validate(raw)
-        result = catalog_reply.finalize(context_req, output.model_dump())
+        result = catalog_reply.finalize(req, output.model_dump())
     except (LLMUnavailable, ValueError, TypeError, AttributeError):
         return handoff(req, row, 'generation_unavailable')
-    if result.requires_human_attention or output.handoff_reason or result.action == 'CREATE_LEAD':
-        reason = output.handoff_reason or ('purchase_assistance' if result.action == 'CREATE_LEAD' else 'missing_information')
+    if result.requires_human_attention or output.handoff_reason:
+        reason = output.handoff_reason or 'missing_information'
         response = handoff(req, row, reason)
         response.offering_ids = result.offering_ids
         response.collected_fields = result.collected_fields
+        response.offering_type = result.offering_type
         if result.intent == 'price_blocked':
             response.intent = result.intent
         return response
     unresolved = failed or (output.previous_answer_unresolved and any(m['role'] == 'assistant' for m in memory['history']))
-    current, text = complete(req, row, reply=result.private_dm, interested=output.buying_interest or interested(req.message_text),
+    reply = result.private_dm
+    if result.action == 'CREATE_LEAD' and (not reply.strip() or is_handoff_line(reply)):
+        # Every detail is in: a confirmation, never the "in the queue" line.
+        reply = lead_confirmation(req.message_text)
+    current, text = complete(req, row, reply=reply,
+                             interested=output.buying_interest or result.action == 'CREATE_LEAD' or interested(req.message_text),
                              unresolved=unresolved, preferences=[p.model_dump() for p in output.preferences], source_text=req.message_text)
     if current['status'] != 'ai':
         return GenerateReplyResponse(public_reply=text if req.event_type == 'comment' else None,

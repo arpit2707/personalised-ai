@@ -29,10 +29,12 @@ def test_upsert_preserves_description_and_replaces_price():
     assert result.description == 'Updated cotton shirt'
 
 
-def test_blocked_catalog_description_never_reaches_generation():
-    endpoints.catalog_store.upsert_product('test_brand', product(description='chemical-free fabric'))
+def test_seller_catalog_text_does_not_trigger_the_safety_filter():
+    # Only the customer's words and the model's output are filtered; a seller's
+    # description must not silence every reply about that item.
+    endpoints.catalog_store.upsert_product('test_brand', product(description='toxic dye free fabric, no chemicals'))
     response = TestClient(app).post('/api/v1/generate-reply', json={
         'brand_id': 'test_brand', 'sender_id': 'u', 'message_text': 'Details please',
         'post_context': {'post_id': 'p', 'tagged_product_sku': 'one'},
     })
-    assert response.json()['private_dm'] == SAFETY_REFUSAL
+    assert response.json()['private_dm'] != SAFETY_REFUSAL
