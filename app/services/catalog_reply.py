@@ -116,6 +116,10 @@ def build_system_prompt(persona: BrandPersona, req: GenerateReplyRequest) -> str
         "- preferences: only size/color/language the customer states in the CURRENT message, with the exact quote as evidence.",
         "- POST (when given) says what the post the customer reacted to is about. Use it to understand the question "
         "(\"yeh wala\", \"is offer me\"), but prices still come only from the CATALOG.",
+        "- Items marked shown_in_this_post are what the post shows: \"price?\", \"isme kya hai\", \"ye wala\" mean that item. "
+        "If the post shows several items, keep the public reply general and list them with prices in private_dm, "
+        "then ask which one they like.",
+        "- \"The red one from the post\" and similar: use an item only when exactly one fits; otherwise ask which one.",
     ]
     if playbook and playbook.rules:
         lines.append("Industry rules:")
@@ -144,8 +148,10 @@ def _offering_for_prompt(o: OfferingContext) -> Dict[str, Any]:
         ]
     if o.includes:
         item["includes"] = o.includes
-    if o.linked_to_post:
+    if o.linked_to_post or o.match == "post":
         item["shown_in_this_post"] = True
+    if o.match and o.match != "post":
+        item["why_listed"] = o.match
     if o.availability:
         item["availability"] = [a.model_dump() for a in o.availability]
     return item

@@ -195,3 +195,13 @@ def test_prompt_names_the_commenter_and_asks_for_no_tag():
     req = GenerateReplyRequest.model_validate({**MAKEUP, "comment_author": "priya_sharma"})
     assert "Commenter: priya_sharma" in catalog_reply.build_user_prompt(req)
     assert "no @mentions" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), req)
+
+
+def test_post_item_rule_and_match_reach_the_prompt():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    offering = {**MAKEUP["offerings"][0], "linked_to_post": False, "match": "post"}
+    req = GenerateReplyRequest.model_validate({**MAKEUP, "offerings": [offering]})
+    assert '"shown_in_this_post": true' in catalog_reply.build_user_prompt(req)
+    assert "mean that item" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), req)
+    chat = GenerateReplyRequest.model_validate({**MAKEUP, "offerings": [{**offering, "match": "chat"}]})
+    assert '"why_listed": "chat"' in catalog_reply.build_user_prompt(chat)

@@ -75,6 +75,11 @@ class OfferingContext(BaseModel):
     includes: List[str] = Field(default_factory=list)
     linked_to_post: bool = False
     availability: Optional[List[OfferingAvailability]] = None
+    # Why the backend picked it: post (shown in the post the customer is asking
+    # about), chat (talked about earlier), search (matches this message),
+    # spotlight (a post the seller highlights for DMs) or overview (background
+    # for an open question; no prices until the customer narrows down).
+    match: Optional[Literal["post", "chat", "search", "spotlight", "overview"]] = None
 
 class LeadField(BaseModel):
     key: str
