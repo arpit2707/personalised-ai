@@ -229,3 +229,25 @@ def test_offering_type_comes_back(monkeypatch):
         "private_dm": "Bridal full look ₹18,000 se start.", "action": "ANSWER", "offering_type": "SERVICES",
     }, monkeypatch)
     assert data["offering_type"] == "SERVICES"
+
+
+SPOT = {"post_id": "ig_9", "label": "Diwali bridal offer", "permalink": "https://instagram.com/p/abc",
+        "caption": "Bridal looks for Diwali", "offering_ids": ["off_bridal"]}
+
+
+def test_spotlight_reaches_the_prompt():
+    from app.models.schemas import BrandPersona, GenerateReplyRequest
+    req = GenerateReplyRequest.model_validate({**MAKEUP, "event_type": "dm", "spotlight": [SPOT]})
+    prompt = catalog_reply.build_user_prompt(req)
+    assert "Diwali bridal offer" in prompt
+    assert "https://instagram.com/p/abc" in prompt
+    assert "SPOTLIGHT lists the posts" in catalog_reply.build_system_prompt(BrandPersona(brand_name="G"), req)
+
+
+def test_spotlight_link_is_allowed_other_links_are_not(monkeypatch):
+    ok = post({**MAKEUP, "event_type": "dm", "spotlight": [SPOT]}, {
+        "private_dm": "Ye dekhiye: https://instagram.com/p/abc", "action": "ANSWER"}, monkeypatch)
+    assert "https://instagram.com/p/abc" in ok["private_dm"]
+    bad = post({**MAKEUP, "event_type": "dm", "sender_id": "u2", "spotlight": [SPOT]}, {
+        "private_dm": "Ye dekhiye: https://instagram.com/p/other", "action": "ANSWER"}, monkeypatch)
+    assert "other" not in (bad["private_dm"] or "")

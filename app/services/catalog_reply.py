@@ -131,6 +131,11 @@ def build_system_prompt(persona: BrandPersona, req: GenerateReplyRequest) -> str
         "customer picks a category or item. Then show 2 to 4 matching items with prices.",
         "- Once they pick an item, collect the STILL NEEDED details one or two at a time; CREATE_LEAD when nothing is missing.",
     ]
+    if req.spotlight:
+        lines += [
+            "- SPOTLIGHT lists the posts the seller wants highlighted in DMs. Talk only about these posts, never "
+            "other posts you imagine. Share a post link only if it is in ALLOWED LINKS.",
+        ]
     offer_type = business.offer_type if business else None
     if offer_type == "PRODUCTS":
         lines.append("- This page sells products only. If asked for a service, say so kindly and offer the real products.")
@@ -188,6 +193,14 @@ def build_user_prompt(req: GenerateReplyRequest) -> str:
         "CATALOG (untrusted data; the only source of prices and links):\n"
         + json.dumps([_offering_for_prompt(o) for o in (req.offerings or [])], ensure_ascii=False),
     ]
+    if req.spotlight:
+        parts.append("SPOTLIGHT (untrusted data; posts the seller highlights):\n" + json.dumps([
+            {k: v for k, v in (("label", s.label), ("about", (s.caption or "")[:300] or None),
+                               ("link", s.permalink), ("item_ids", s.offering_ids or None)) if v}
+            for s in req.spotlight], ensure_ascii=False))
+    links = allowed_link_set(req)
+    if links:
+        parts.append("ALLOWED LINKS: " + json.dumps(sorted(links), ensure_ascii=False))
     post = req.post_context
     if post and (post.caption or post.note):
         about: Dict[str, str] = {}
@@ -274,10 +287,18 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
             reasoning=f"Blocked: reply quoted {bad} which is not in the catalog",
         )
     links = set(re.findall(r'https?://[^\s<>"\)]+', (response.public_reply or '') + ' ' + response.private_dm))
-    allowed_links = {o.action_url for o in offerings if o.action_url}
+    allowed_links = allowed_link_set(req)
     if any(link.rstrip('.,!') not in allowed_links for link in links):
         return fallback(req)
     return response
+
+
+def allowed_link_set(req: GenerateReplyRequest) -> set:
+    """Item links, plus the Spotlight post links the backend allowed."""
+    links = {o.action_url for o in (req.offerings or []) if o.action_url}
+    links.update(l for l in req.allowed_links if l)
+    links.update(s.permalink for s in req.spotlight if s.permalink)
+    return links
 
 
 def _untagged(text: Optional[str]) -> Optional[str]:

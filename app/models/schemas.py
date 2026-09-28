@@ -105,6 +105,15 @@ class BusinessContext(BaseModel):
     offer_type: Optional[Literal["PRODUCTS", "SERVICES", "BOTH"]] = None
     categories: List[str] = Field(default_factory=list, max_length=30)
 
+class SpotlightPost(BaseModel):
+    """A post the seller highlights in plain DMs (AI-on posts only)."""
+    post_id: str = Field(max_length=128)
+    label: Optional[str] = Field(default=None, max_length=120)
+    caption: Optional[str] = Field(default=None, max_length=500)
+    permalink: Optional[str] = Field(default=None, max_length=500)
+    offering_ids: List[str] = Field(default_factory=list, max_length=10)
+
+
 class RecentMessage(BaseModel):
     # "from" is a Python keyword, so the attribute is `sender`.
     sender: str = Field(alias="from")
@@ -125,6 +134,9 @@ class GenerateReplyRequest(BaseModel):
     offerings: Optional[List[OfferingContext]] = Field(default=None, max_length=30)
     goal_state: Optional[Dict[str, Any]] = None
     recent_messages: List[RecentMessage] = Field(default_factory=list, max_length=20)
+    spotlight: List[SpotlightPost] = Field(default_factory=list, max_length=5)
+    # Links the reply may contain besides item links (Spotlight permalinks).
+    allowed_links: List[str] = Field(default_factory=list, max_length=20)
     # Public comment replies: the backend puts the @tag in front itself, so the
     # model only needs the name to know who it is answering.
     comment_author: Optional[str] = Field(default=None, max_length=100)
