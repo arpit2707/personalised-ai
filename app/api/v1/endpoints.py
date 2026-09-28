@@ -126,7 +126,8 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
     user_prompt = prompt_assembler.build_user_prompt(
         req.message_text, req.channel_type, req.event_type, req.post_context, target, memory)
     try:
-        raw = gemini_service.generate(prompt_assembler.build_system_prompt(persona), user_prompt, req.message_text)
+        raw = gemini_service.generate(prompt_assembler.build_system_prompt(persona), user_prompt, req.message_text,
+                                     req.llm)
         if raw.get('intent') == 'safety_refusal' or contains_blocked_content(raw):
             return safety_refusal(req)
         output = ModelReply.model_validate(raw)
@@ -178,7 +179,7 @@ def offering_reply(req, row, memory, failed):
         memory = {**memory, 'history': []}
     prompt += '\nRetained conversation data:\n' + json.dumps(memory, ensure_ascii=False)
     try:
-        raw = gemini_service.generate(system, prompt, req.message_text)
+        raw = gemini_service.generate(system, prompt, req.message_text, req.llm)
         if contains_blocked_content(raw) or raw.get('intent') == 'safety_refusal':
             return safety_refusal(req)
         output = ModelReply.model_validate(raw)

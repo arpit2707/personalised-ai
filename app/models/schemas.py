@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from typing import Optional, List, Literal, Dict, Any
 from enum import Enum
 
@@ -121,6 +121,14 @@ class RecentMessage(BaseModel):
 
     model_config = {"populate_by_name": True}
 
+class LLMConfig(BaseModel):
+    """The provider, key and model the backend chose for DM replies (set by the
+    superadmin or the workspace). Without it the service's own Gemini key answers."""
+    provider: Literal["GEMINI", "OPENAI", "CLAUDE"]
+    api_key: SecretStr = Field(min_length=8, max_length=400)
+    model: str = Field(min_length=1, max_length=100, pattern=r"^[\w.:\-/@]+$")
+
+
 class GenerateReplyRequest(BaseModel):
     brand_id: str = Field(min_length=1, max_length=128)
     channel_type: Literal["instagram", "facebook", "whatsapp"] = "instagram"
@@ -144,6 +152,7 @@ class GenerateReplyRequest(BaseModel):
     # seller wants the AI to answer, so it asks to reopen a chat no agent has
     # claimed. Other callers keep the queue until an agent releases it.
     resume_if_pending: bool = False
+    llm: Optional[LLMConfig] = None
 
 class GenerateReplyResponse(BaseModel):
     public_reply: Optional[str] = None
