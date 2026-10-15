@@ -192,7 +192,7 @@ def offering_reply(req, row, memory, failed):
         response.offering_ids = result.offering_ids
         response.collected_fields = result.collected_fields
         response.offering_type = result.offering_type
-        if result.intent == 'price_blocked':
+        if result.intent in ('price_blocked', 'fact_blocked'):
             response.intent = result.intent
         return response
     unresolved = failed or (output.previous_answer_unresolved and any(m['role'] == 'assistant' for m in memory['history']))

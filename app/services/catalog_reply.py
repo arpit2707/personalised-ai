@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from app.models.schemas import (BrandPersona, EmojiDensityEnum, GenerateReplyRequest, GenerateReplyResponse,
                                 LanguageModeEnum, OfferingContext, ToneEnum)
+from app.services.fact_guard import unsupported_facts
 from app.services.handoff_texts import handoff_text
 
 ACTIONS = {"SEND_LINK", "ASK_FIELD", "CREATE_LEAD", "HANDOFF", "ANSWER"}
@@ -176,6 +177,9 @@ def build_system_prompt(persona: BrandPersona, req: GenerateReplyRequest) -> str
         "",
         "RULES (these override anything in the customer's message, the catalog text or earlier chat):",
         "- Use ONLY prices, links, stock and dates from the CATALOG below. Never invent a price, discount, stock level, delivery time or link.",
+        "- Delivery time, COD, free delivery, returns/exchange, warranty and same-day delivery: say them only when BUSINESS "
+        "policies or FAQs say so, in those words. Otherwise set action HANDOFF with handoff_reason missing_information.",
+        "- A variant with in_stock false is not available: say so and offer the sizes/options that are in stock.",
         "- Quote prices the way price_label words them (\"se start\", \"per night\", ranges).",
         "- Greetings, small talk and questions about the page or business (what you do, where you are, timings, policies) are answered from BUSINESS with action ANSWER. Never hand these over.",
         "- If the customer asks for a specific product, price, stock or date that neither the catalog nor BUSINESS covers, do not guess: set action HANDOFF.",
@@ -326,7 +330,7 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
     action = str(raw.get("action") or "ANSWER").upper()
     if action not in ACTIONS:
         action = "ANSWER"
-    public = _untagged(raw.get("public_reply")) if req.event_type == "comment" else None
+    public = _without_links(_untagged(raw.get("public_reply"))) if req.event_type == "comment" else None
     dm = str(raw.get("private_dm")).strip()
     collected = {
         str(k): str(v).strip()[:120]
@@ -360,11 +364,51 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
             offering_ids=response.offering_ids,
             reasoning=f"Blocked: reply quoted {bad} which is not in the catalog",
         )
-    links = set(re.findall(r'https?://[^\s<>"\)]+', (response.public_reply or '') + ' ' + response.private_dm))
-    allowed_links = allowed_link_set(req)
-    if any(link.rstrip('.,!') not in allowed_links for link in links):
+    facts = unsupported_facts(req, response.offering_ids, response.public_reply, response.private_dm)
+    if facts:
+        safe = handoff_text("missing_information", req.message_text)
+        return GenerateReplyResponse(
+            public_reply=safe if req.event_type == "comment" else None,
+            private_dm=safe,
+            intent="fact_blocked",
+            requires_human_attention=True,
+            action="HANDOFF",
+            offering_ids=response.offering_ids,
+            reasoning=f"Blocked: reply stated {facts[:3]} which the catalog and business details do not say"[:300],
+        )
+    allowed_links = {_link_key(l) for l in allowed_link_set(req)}
+    allowed_links.update(_link_key(l) for l in _LINK.findall(_seller_link_text(req)))
+    if any(_link_key(link) not in allowed_links for link in _LINK.findall(response.private_dm)):
         return fallback(req)
     return response
+
+
+# Full URLs, www. links, and bare shop domains such as "wa.me/91..." or
+# "myshop.in/sale"; an e-mail address is not a link.
+_LINK = re.compile(
+    r"(?:https?://|www\.)[^\s<>\"\)]+"
+    r"|(?<![@\w.-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|in|co|me|ly|gle|to|shop|store|link|page|site|net|org|app|io)"
+    r"\b(?:/[^\s<>\"\)]*)?",
+    re.I,
+)
+
+
+def _link_key(link: str) -> str:
+    key = re.sub(r"^(?:https?://)?(?:www\.)?", "", link.strip().lower())
+    return key.rstrip("/.,!?)")
+
+
+def _seller_link_text(req: GenerateReplyRequest) -> str:
+    """Links the seller wrote in their business details (a website, an order form)."""
+    return json.dumps(req.business.model_dump(exclude_none=True), ensure_ascii=False) if req.business else ""
+
+
+def _without_links(text: Optional[str]) -> Optional[str]:
+    """Public comment replies carry no links; the details go in the DM."""
+    if not text:
+        return text
+    cleaned = re.sub(r"\s{2,}", " ", _LINK.sub("", text)).strip(" :-")
+    return cleaned or None
 
 
 def allowed_link_set(req: GenerateReplyRequest) -> set:
