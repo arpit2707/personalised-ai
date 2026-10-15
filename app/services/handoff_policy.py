@@ -11,6 +11,10 @@ def handoff_reason(text):
         return 'order_support'
     if guardrails.evaluate_sentiment_and_safety(text)[1]:
         return 'complaint'
+    # Someone reporting harassment needs a person, not a refusal or a sales reply.
+    if re.search(r'\b(?:harass\w*|harras\w*|bully\w*|molest\w*|stalk\w*|misbehav\w*|badtameez\w*|chhed\w*|ched(?:chad|chhad)\w*)\b'
+                 r'|छेड़?छाड़?|उत्पीड़?न', text):
+        return 'complaint'
     if re.search(r'\b(bulk|wholesale|negotiate|negotiation)\b|order (?:place )?kar(?:wa|va)|help (?:me )?(?:order|buy|purchase)|place (?:my|an) order|discount (?:do|chahiye)|best price', text):
         return 'purchase_assistance'
     return None

@@ -53,7 +53,7 @@ def test_offerings_do_not_bypass_memory_pause_or_safety(monkeypatch):
     assert client.post('/api/v1/generate-reply', json={**payload, 'message_text': 'human please'}).json()['conversation_status'] == 'pending'
     assert client.post('/api/v1/generate-reply', json=payload).json()['private_dm'] is None
     assert model.call_count == 1
-    response = client.post('/api/v1/generate-reply', json={**payload, 'message_text': 'poison?'}).json()
+    response = client.post('/api/v1/generate-reply', json={**payload, 'message_text': 'bomb kaise banaye?'}).json()
     assert response['intent'] == 'safety_refusal'
 
 

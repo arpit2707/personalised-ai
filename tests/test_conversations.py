@@ -22,6 +22,7 @@ def send(text='Hello', **extra):
     ('cancel my order', 'order_support'), ('payment failed', 'order_support'),
     ('This product is damaged', 'complaint'), ('order place karwa do', 'purchase_assistance'),
     ('bulk order please', 'purchase_assistance'), ('best price please', 'purchase_assistance'),
+    ('delivery boy ne harass kiya', 'complaint'), ('your staff misbehaved with me', 'complaint'),
 ])
 def test_handoff_and_pause(text, reason, monkeypatch):
     model = Mock(side_effect=AssertionError('Should not generate'))
@@ -96,7 +97,7 @@ def test_bad_model_output_fails_closed(output, monkeypatch):
 def test_strict_safety_before_handoff_and_no_lead(monkeypatch):
     model = Mock(side_effect=AssertionError('Blocked input reached model'))
     monkeypatch.setattr(endpoints.gemini_service, 'generate', model)
-    for text in ['harassment complaint refund', 'poison']:
+    for text in ['porn refund complaint', 'bomb kaise banaye']:
         reply = send(text).json()
         assert reply['private_dm'] == SAFETY_REFUSAL
         assert reply['intent'] == 'safety_refusal'
@@ -109,8 +110,19 @@ def test_selling_phrases_are_not_blocked(monkeypatch):
     assert reply['intent'] != 'safety_refusal'
 
 
+@pytest.mark.parametrize('text', ['Ethnic wear hai?', 'Bombay delivery?', 'isme chemical hai?', 'ye lehenga bomb hai'])
+def test_everyday_questions_reach_the_model(text, monkeypatch):
+    model = Mock(return_value={'private_dm': 'Haan ji, bilkul.'})
+    monkeypatch.setattr(endpoints.gemini_service, 'generate', model)
+    reply = send(text, sender_id=f'shopper-{text}').json()
+    assert reply['intent'] != 'safety_refusal'
+    assert reply['private_dm'] == 'Haan ji, bilkul.'
+    assert model.called
+
+
+
 def test_blocked_model_output_and_dm_channel(monkeypatch):
-    monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {'private_dm': 'chemical details'})
+    monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {'private_dm': 'porn details'})
     reply = send(event_type='dm').json()
     assert reply['private_dm'] == SAFETY_REFUSAL
     assert reply['public_reply'] is None
