@@ -3,9 +3,13 @@
 Pausing reasons hand the chat to the seller: one friendly message, then the AI
 stays quiet until the seller (or the backend's pause timer) reopens it.
 Soft reasons ("the team will confirm this") keep the AI answering the next
-message, and the same soft line is never sent twice in a row.
+message, and in a DM the same soft line is never sent twice in a row.
 """
-from app.services.crisis import crisis_reply, language_of
+from typing import Optional
+
+from app.services.crisis import (CRISIS_PUBLIC, HELPLINES_EN, HELPLINES_HINDI, HELPLINES_HINGLISH, crisis_reply,
+                                 language_of)
+from app.services.guardrails import SAFETY_REFUSAL
 
 PAUSING_REASONS = {
     "human_request", "complaint", "order_support",
@@ -63,18 +67,28 @@ LEAD_CONFIRMATION = (
 )
 
 
-def _pick(pair, customer_text: str) -> str:
-    # "price", "details?" say nothing about language; Hinglish is the default
-    # for these pages. A real English sentence gets English.
-    words = len((customer_text or "").split())
-    english = language_of(customer_text) == "english" and words > 2
-    return pair[0] if english else pair[1]
+def clear_language(text: str) -> Optional[str]:
+    """'english', 'hinglish' or 'hindi' when the message shows it, else None.
+
+    "price", "15 Nov" or a phone number say nothing about language; a real
+    English sentence (three words or more, no Hindi words) does.
+    """
+    language = language_of(text)
+    if language != "english":
+        return language
+    return "english" if len((text or "").split()) > 2 else None
 
 
-def handoff_text(reason: str, customer_text: str = "") -> str:
+def _pick(pair, customer_text: str, language: Optional[str] = None) -> str:
+    # Hinglish is the default for these pages when nothing shows the language.
+    language = language or clear_language(customer_text)
+    return pair[0] if language == "english" else pair[1]
+
+
+def handoff_text(reason: str, customer_text: str = "", language: Optional[str] = None) -> str:
     if reason == "crisis":
         return crisis_reply(customer_text)
-    return _pick(_TEXTS.get(reason, _TEXTS["missing_information"]), customer_text)
+    return _pick(_TEXTS.get(reason, _TEXTS["missing_information"]), customer_text, language)
 
 
 def soft_texts(reason: str) -> set:
@@ -82,15 +96,24 @@ def soft_texts(reason: str) -> set:
     return set(_TEXTS.get(reason, _TEXTS["missing_information"]))
 
 
-def soft_again(customer_text: str = "") -> str:
-    return _pick(_AGAIN, customer_text)
+def soft_again(customer_text: str = "", language: Optional[str] = None) -> str:
+    return _pick(_AGAIN, customer_text, language)
 
 
-def lead_confirmation(customer_text: str = "") -> str:
-    return _pick(LEAD_CONFIRMATION, customer_text)
+def lead_confirmation(customer_text: str = "", language: Optional[str] = None) -> str:
+    return _pick(LEAD_CONFIRMATION, customer_text, language)
 
 
 def is_handoff_line(text: str) -> bool:
     """True for any canned hand-off line, so a model echoing one is not a confirmation."""
     lines = {t for pair in (*_TEXTS.values(), _AGAIN) for t in pair}
     return (text or "").strip() in lines or "queue" in (text or "").casefold()
+
+
+_FIXED_LINES = {t for pair in (*_TEXTS.values(), _AGAIN, LEAD_CONFIRMATION) for t in pair} | {
+    HELPLINES_EN, HELPLINES_HINGLISH, HELPLINES_HINDI, CRISIS_PUBLIC, SAFETY_REFUSAL}
+
+
+def is_fixed_line(text: Optional[str]) -> bool:
+    """True for a line sent word for word (hand-off, helpline, refusal), never the model's own."""
+    return bool(text) and text.strip() in _FIXED_LINES

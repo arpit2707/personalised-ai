@@ -10,7 +10,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.core.config import settings
-from app.services.handoff_texts import PAUSING_REASONS, handoff_text, soft_again, soft_texts
+from app.services.handoff_texts import PAUSING_REASONS, handoff_text, is_fixed_line, soft_again, soft_texts
+
+
+# At most one "message mil gaya" per this long in a DM (the backend's
+# AI_DOWN_NOTICE_MS): a long outage must not leave the chat silent for good.
+AI_DOWN_NOTICE_SECONDS = 30 * 60
 
 
 class ConversationConflict(Exception):
@@ -24,10 +29,11 @@ class ConversationStore:
 
     @contextmanager
     def db(self):
+        # Expired rows are deleted by purge() (startup and every 60 s), not in
+        # every transaction: reads skip anything past retention on their own.
         if settings.DATABASE_URL and self.path is None:
             from app.services.pg_conversations import pg_conversations
             with pg_conversations.transaction() as conn:
-                self._purge(conn)
                 yield conn
             return
         path = self.path or settings.CONVERSATION_DB_PATH
@@ -49,7 +55,7 @@ class ConversationStore:
                 );
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY, conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                    role TEXT NOT NULL, text TEXT NOT NULL, created REAL NOT NULL
+                    role TEXT NOT NULL, text TEXT NOT NULL, created REAL NOT NULL, message_id TEXT
                 );
                 CREATE INDEX IF NOT EXISTS message_history ON messages(conversation, created);
                 CREATE TABLE IF NOT EXISTS preferences (
@@ -58,8 +64,15 @@ class ConversationStore:
                     PRIMARY KEY(conversation, key)
                 );
             ''')
+            # Files created before message ids were stored.
+            if 'message_id' not in {c['name'] for c in conn.execute("PRAGMA table_info(messages)")}:
+                conn.execute("ALTER TABLE messages ADD COLUMN message_id TEXT")
+            conn.executescript('''
+                CREATE INDEX IF NOT EXISTS message_expiry ON messages(created);
+                CREATE INDEX IF NOT EXISTS preference_expiry ON preferences(created);
+                CREATE INDEX IF NOT EXISTS conversation_expiry ON conversations(updated);
+            ''')
             conn.execute("BEGIN IMMEDIATE")
-            self._purge(conn)
             yield conn
             conn.commit()
         except Exception:
@@ -68,8 +81,11 @@ class ConversationStore:
         finally:
             conn.close()
 
+    def _cutoff(self):
+        return self.clock() - settings.MEMORY_RETENTION_DAYS * 86400
+
     def _purge(self, db):
-        cutoff = self.clock() - settings.MEMORY_RETENTION_DAYS * 86400
+        cutoff = self._cutoff()
         db.execute("DELETE FROM messages WHERE created <= ?", (cutoff,))
         db.execute("DELETE FROM preferences WHERE created <= ?", (cutoff,))
         db.execute("UPDATE conversations SET product=NULL, product_at=NULL WHERE product_at <= ?", (cutoff,))
@@ -77,19 +93,37 @@ class ConversationStore:
         db.execute("DELETE FROM conversations WHERE updated <= ?", (cutoff,))
 
     def purge(self):
-        with self.db():
-            pass
+        with self.db() as db:
+            self._purge(db)
 
-    @staticmethod
-    def _row(db, brand, cid):
+    def _fresh(self, row):
+        """The row with expired product/lead observations hidden until the purge clears them."""
+        row = dict(row)
+        cutoff = self._cutoff()
+        if row.get('product_at') is not None and row['product_at'] <= cutoff:
+            row['product'] = row['product_at'] = None
+        if row.get('lead_at') is not None and row['lead_at'] <= cutoff:
+            row['lead_at'] = None
+        return row
+
+    def _row(self, db, brand, cid):
         row = db.execute("SELECT * FROM conversations WHERE brand=? AND id=?", (brand, cid)).fetchone()
         if not row:
             raise KeyError(cid)
-        return dict(row)
+        return self._fresh(row)
 
     def begin(self, req):
+        """Stores the customer's message and returns the snapshot finish() must still match.
+
+        The snapshot's message_row is the stored message this turn answers. A
+        retry of the newest message (same message_id) is neither stored again
+        nor a new turn, so an answer already in flight for it stays valid.
+        """
         now = self.clock()
         with self.db() as db:
+            # A chat idle past retention starts over, even before the next purge.
+            db.execute("DELETE FROM conversations WHERE brand=? AND channel=? AND sender=? AND updated <= ?",
+                       (req.brand_id, req.channel_type, req.sender_id, self._cutoff()))
             db.execute("INSERT OR IGNORE INTO conversations(id,brand,channel,sender,updated) VALUES(?,?,?,?,?)",
                        (str(uuid4()), req.brand_id, req.channel_type, req.sender_id, now))
             row = db.execute("SELECT * FROM conversations WHERE brand=? AND channel=? AND sender=?",
@@ -97,27 +131,53 @@ class ConversationStore:
             cid = row['id']
             if getattr(req, 'resume_if_pending', False) and row['status'] == 'pending' and row['agent'] is None:
                 db.execute("UPDATE conversations SET status='ai',reason=NULL,unresolved=0 WHERE id=?", (cid,))
-            db.execute("INSERT INTO messages(conversation,role,text,created) VALUES(?,?,?,?)",
-                       (cid, 'user', req.message_text, now))
-            db.execute("UPDATE conversations SET updated=?,version=version+1 WHERE id=?", (now, cid))
-            return self._row(db, req.brand_id, cid)
+            message_id = getattr(req, 'message_id', None)
+            last = self._last_user_message(db, cid)
+            if not (message_id and last and last['message_id'] == message_id):
+                db.execute("INSERT INTO messages(conversation,role,text,created,message_id) VALUES(?,?,?,?,?)",
+                           (cid, 'user', req.message_text, now, message_id))
+                db.execute("UPDATE conversations SET updated=?,version=version+1 WHERE id=?", (now, cid))
+                last = self._last_user_message(db, cid)
+            snapshot = self._row(db, req.brand_id, cid)
+            snapshot['message_row'] = last['id']
+            return snapshot
+
+    @staticmethod
+    def _last_user_message(db, cid):
+        return db.execute("SELECT id,message_id FROM messages WHERE conversation=? AND role='user' "
+                          "ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
+
+    def answered_later(self, brand, snapshot):
+        """True when the customer wrote again after the message this snapshot answers."""
+        if snapshot.get('message_row') is None:
+            return False
+        with self.db() as db:
+            self._row(db, brand, snapshot['id'])
+            return db.execute("SELECT id FROM messages WHERE conversation=? AND role='user' AND id>? LIMIT 1",
+                              (snapshot['id'], snapshot['message_row'])).fetchone() is not None
 
     def context(self, brand, cid):
         with self.db() as db:
             self._row(db, brand, cid)
-            rows = db.execute("SELECT role,text FROM messages WHERE conversation=? ORDER BY id DESC LIMIT ?",
-                              (cid, settings.HISTORY_MAX_MESSAGES)).fetchall()
+            cutoff = self._cutoff()
+            rows = db.execute("SELECT role,text FROM messages WHERE conversation=? AND created > ? "
+                              "ORDER BY id DESC LIMIT ?", (cid, cutoff, settings.HISTORY_MAX_MESSAGES)).fetchall()
             history, remaining = [], settings.HISTORY_MAX_CHARS
             for row in rows:
+                # Hand-off and helpline lines are not part of the talk: a model
+                # shown them as its own answers starts repeating them.
+                if row['role'] == 'assistant' and is_fixed_line(row['text']):
+                    continue
                 if len(row['text']) > remaining:
                     break
                 history.append(dict(row))
                 remaining -= len(row['text'])
-            prefs = db.execute("SELECT key,value FROM preferences WHERE conversation=?", (cid,)).fetchall()
+            prefs = db.execute("SELECT key,value FROM preferences WHERE conversation=? AND created > ?",
+                               (cid, cutoff)).fetchall()
             return {'history': list(reversed(history)), 'preferences': {p['key']: p['value'] for p in prefs}}
 
-    def finish(self, brand, snapshot, *, reply=None, reason=None, product=None,
-               interested=False, unresolved=False, preferences=(), source_text='', flag=None):
+    def finish(self, brand, snapshot, *, reply=None, reason=None, product=None, interested=False,
+               unresolved=False, preferences=(), source_text='', flag=None, event_type='dm', language=None):
         now = self.clock()
         cid = snapshot['id']
         with self.db() as db:
@@ -146,16 +206,24 @@ class ConversationStore:
                            DO UPDATE SET value=excluded.value,created=excluded.created''',
                            (cid, pref['key'], pref['value'], now))
             if reason and not (reply and reason == 'crisis'):
-                reply = handoff_text(reason, source_text)
-                if reason not in PAUSING_REASONS:
-                    last = db.execute("SELECT text FROM messages WHERE conversation=? AND role='assistant' "
-                                      "ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
+                reply = handoff_text(reason, source_text, language)
+                # Only in a DM: every comment is its own public thread and always
+                # gets its line, even while the model is down.
+                if reason not in PAUSING_REASONS and event_type == 'dm':
+                    # A seller's message in between means the line is not a repeat.
+                    last = db.execute("SELECT role,text,created FROM messages WHERE conversation=? "
+                                      "AND role IN ('assistant','agent') ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
                     # The same "team will confirm" line twice in a row reads like a bot stuck
                     # in a loop, and silence reads like a dead one: say it another way.
-                    # (While the model is down, one "message mil gaya" per outage is enough.)
-                    if last and last['text'] in soft_texts(reason):
-                        reply = None if reason == 'generation_unavailable' else soft_again(source_text)
-            if reply:
+                    if last and last['role'] == 'assistant' and last['text'] in soft_texts(reason):
+                        if reason != 'generation_unavailable':
+                            reply = soft_again(source_text, language)
+                        elif now - last['created'] < AI_DOWN_NOTICE_SECONDS:
+                            # While the model is down, one "message mil gaya" per 30 minutes.
+                            reply = None
+            # The backend retries a comment the model could not answer and never
+            # posts this line under it, so it is not something the customer read.
+            if reply and not (reason == 'generation_unavailable' and event_type == 'comment'):
                 db.execute("INSERT INTO messages(conversation,role,text,created) VALUES(?,?,?,?)",
                            (cid, 'assistant', reply, now))
             return self._row(db, brand, cid), reply
@@ -178,20 +246,23 @@ class ConversationStore:
     def detail(self, brand, cid):
         with self.db() as db:
             row = self._row(db, brand, cid)
+            cutoff = self._cutoff()
             messages = [dict(m) for m in db.execute(
-                "SELECT role,text,created FROM messages WHERE conversation=? ORDER BY id DESC LIMIT 100", (cid,))]
+                "SELECT role,text,created FROM messages WHERE conversation=? AND created > ? ORDER BY id DESC LIMIT 100",
+                (cid, cutoff))]
             row['messages'] = list(reversed(messages))
             row['preferences'] = {p['key']: p['value'] for p in db.execute(
-                "SELECT key,value FROM preferences WHERE conversation=?", (cid,))}
+                "SELECT key,value FROM preferences WHERE conversation=? AND created > ?", (cid, cutoff))}
             user_texts = [m['text'][:240] for m in row['messages'] if m['role'] == 'user'][-3:]
             row['summary'] = {'reason': row['reason'], 'product_sku': row['product'], 'recent_customer_messages': user_texts}
             return row
 
     def inbox(self, brand, limit=50, offset=0):
         with self.db() as db:
-            return [dict(r) for r in db.execute('''SELECT * FROM conversations WHERE brand=? AND status IN ('pending','active')
+            return [self._fresh(r) for r in db.execute('''SELECT * FROM conversations WHERE brand=?
+                       AND status IN ('pending','active') AND updated > ?
                        ORDER BY CASE priority WHEN 'high' THEN 0 ELSE 1 END, updated ASC LIMIT ? OFFSET ?''',
-                       (brand, limit, offset))]
+                       (brand, self._cutoff(), limit, offset))]
 
     def agent_action(self, brand, cid, agent, action, text=None):
         with self.db() as db:

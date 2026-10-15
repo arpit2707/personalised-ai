@@ -69,7 +69,8 @@ def _customer_text(req: GenerateReplyRequest) -> str:
 
 
 def _sentences(text: str) -> List[str]:
-    return [s for s in re.split(r"(?<=[.!?\n])\s+|[,;]\s+", text) if s.strip()]
+    # "\u0964" is the Devanagari full stop.
+    return [s for s in re.split(r"(?<=[.!?\n\u0964])\s+|[,;]\s+", text) if s.strip()]
 
 
 def unsupported_facts(req: GenerateReplyRequest, offering_ids: List[str], *replies: Optional[str]) -> List[str]:
@@ -122,3 +123,52 @@ def _out_of_stock_claims(req: GenerateReplyRequest, offering_ids: List[str], rep
             if all_out and len(items) == 1:
                 bad.append(sentence.strip())
     return bad
+
+
+# A soft hand-off answer ("the team will confirm this") goes out in the model's
+# own words, so it must defer and must not answer the very point the model said
+# nobody gave it. The checks above let two such claims through: stock when the
+# catalog has no stock data at all, and an arrival day with no number in it.
+_DEFERS = re.compile(
+    r"\b(?:confirm\w*|check(?!out)\w*|get\s+back|let\s+you\s+know|find\s+out|pata\s+kar\w*|team)\b"
+    r"|कन्फर्म|पता\s*कर|टीम",
+    re.I,
+)
+# Whole words only: "kal" must not match inside "kalamkari", nor "कल" inside "कलर".
+_WORD = r"(?<![\w\u0900-\u097f]){}(?![\w\u0900-\u097f])"
+_WHEN = re.compile(
+    r"\b(?:aaj|aj|kal|parso|parson|parsoon|today|tonight|tomorrow|day\s+after|this\s+week|next\s+week|is\s+hafte|"
+    r"agle\s+hafte|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday|somvar|mangalvar|budhvar|"
+    r"guruvar|shukravar|shanivar|ravivar)\b|" + "|".join(_WORD.format(w) for w in ("आज", "कल", "परसों")),
+    re.I,
+)
+_ARRIVES = re.compile(
+    r"\b(?:pahu?nch\w*|deliver\w*|dispatch\w*|ship\w*|courier\w*|arriv\w*|reach\w*|mil\s+ja\w*|aa\s+ja\w*)\b"
+    r"|पहुँच|पहुंच|मिल\s+जा|आ\s+जा",
+    re.I,
+)
+
+
+def soft_answer_problems(req: GenerateReplyRequest, dm: Optional[str], public: Optional[str] = None) -> List[str]:
+    """Why a missing/conflicting-information answer in the model's own words may not go out.
+
+    "no_deferral": it never says the team will confirm. "stock": it affirms
+    stock or availability and the seller gave no stock data. "arrival_time": it
+    names a delivery or arrival day ("kal tak pahunch jayega") the seller never
+    wrote. A rejected answer gets the safe line instead, as before.
+    """
+    problems = [] if _DEFERS.search(dm or "") else ["no_deferral"]
+    seller = _seller_text(req)
+    stock_known = bool(_IN_STOCK.search(seller)) or any(o.variants or o.availability for o in req.offerings or [])
+    for text in (dm, public):
+        for sentence in _sentences(text or ""):
+            # "Stock main team se confirm karke batati hoon" defers; it states nothing.
+            if _DEFERS.search(sentence):
+                continue
+            if not stock_known and _IN_STOCK.search(sentence) and "stock" not in problems:
+                problems.append("stock")
+            when = _WHEN.search(sentence)
+            if when and _ARRIVES.search(sentence) and "arrival_time" not in problems \
+                    and not re.search(_WORD.format(re.escape(when.group(0))), seller, re.I):
+                problems.append("arrival_time")
+    return problems

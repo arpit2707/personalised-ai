@@ -6,21 +6,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.services.conversation_store import conversation_store
+from app.services.gemini_service import gemini_service
+
+# Without a handler our INFO lines (llm_generation ... elapsed_ms) never reach the
+# Render logs; uvicorn only configures its own loggers.
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 
 @asynccontextmanager
 async def lifespan(app):
-    await asyncio.to_thread(conversation_store.purge)
-
     async def cleanup():
+        # The first purge runs alongside the start-up, not before it: on a cold
+        # start the backend's 55 s wait is already counting.
         while True:
-            await asyncio.sleep(60)
             try:
                 await asyncio.to_thread(conversation_store.purge)
             except Exception:
                 logging.getLogger(__name__).error("Conversation retention cleanup failed")
+            await asyncio.sleep(60)
 
     task = asyncio.create_task(cleanup())
+    # The first customer after a cold start should not also wait for the SDK import.
+    await asyncio.to_thread(gemini_service.warm_up)
     try:
         yield
     finally:

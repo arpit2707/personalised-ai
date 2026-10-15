@@ -90,12 +90,29 @@ def test_normal_interest_does_not_handoff():
 
 @pytest.mark.parametrize('reason', ['missing_information', 'conflicting_information'])
 def test_model_judgment_handoff(reason, monkeypatch):
+    # A soft hand-off whose answer passes every guard goes out in the model's own
+    # words; the chat stays with the AI and is only flagged.
     monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {
-        'private_dm': 'Do not forward this speculative answer', 'handoff_reason': reason,
+        'private_dm': 'Iske baare me main team se confirm karke batata hoon.', 'handoff_reason': reason,
     })
-    reply = send().json()
+    reply = send(event_type='dm').json()
     assert reply['handoff_reason'] == reason
-    assert 'speculative' not in reply['private_dm']
+    assert reply['private_dm'] == 'Iske baare me main team se confirm karke batata hoon.'
+    assert reply['conversation_status'] == 'ai'
+    assert reply['requires_human_attention'] is False
+    assert reply['canned'] is False
+
+
+@pytest.mark.parametrize('reason', ['missing_information', 'conflicting_information'])
+def test_model_judgment_handoff_without_a_usable_answer(reason, monkeypatch):
+    # A made-up price (or no text at all) still gets the safe line.
+    for sender, dm in (('a', 'Ye sirf ₹599 me mil jayega'), ('b', '')):
+        monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_, dm=dm: {
+            'private_dm': dm, 'handoff_reason': reason})
+        reply = send(event_type='dm', sender_id=sender).json()
+        assert reply['requires_human_attention'] is True
+        assert '599' not in reply['private_dm']
+        assert reply['canned'] is True
 
 
 def test_unavailable_model_queues_instead_of_inventing(monkeypatch):

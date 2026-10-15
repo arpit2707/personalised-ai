@@ -30,19 +30,38 @@ identified by exact `(brand_id, channel_type, sender_id)`. Responses additionall
 include `conversation_id`, `conversation_status` (`ai`, `pending`, `active`),
 `handoff_reason`, and `lead_interested`.
 
-- Explicit human requests, complaints, order/payment issues, missing or conflicting
-  information enter the human queue immediately.
-- Purchase assistance, bulk orders and negotiation enter the queue at high priority.
+- Explicit human requests, complaints and order/payment issues enter the human
+  queue immediately. Missing or conflicting information only flags the chat; the
+  AI keeps answering.
+- Purchase assistance, bulk orders and negotiation flag the chat at high priority
+  while the AI keeps chatting.
 - Ordinary product interest, price and size inquiries can continue with AI.
 - Two consecutive customer-reported unsuccessful AI answers trigger a handoff.
   Productive follow-ups reset the counter. Raw reply count alone never triggers it.
 - Rules cover common English/Hinglish phrases; model judgment supplements them.
-- Invalid/empty model output or provider failure queues the conversation, without
-  fabricated prices, stock, shipping promises or checkout links.
+- Invalid/empty model output or provider failure sends the honest "message mil gaya"
+  line, without fabricated prices, stock, shipping promises or checkout links. The
+  response keeps `handoff_reason` `generation_unavailable` and says why in `reasoning`:
+  `llm_timeout`, `provider_error:<status or type>`, `invalid_output`, `empty_output`,
+  `not_configured` or `internal_error` (a bug in our own checks, logged with file:line).
+  In a DM the line goes at most once per 30 minutes (the backend's own notice window),
+  so a long outage is not silence for good; every comment response carries it, but it
+  is not kept in the chat memory because the backend retries the comment instead.
+- When the model asks the team to confirm a fact (`missing_information`,
+  `conflicting_information`) but its own answer passes every guard, that answer is
+  sent and the chat is only flagged; a blocked or empty answer gets the safe line.
+  Such an answer must also say the team will confirm, and may not state stock or an
+  arrival day ("kal tak pahunch jayega") the seller never gave; otherwise the safe line goes.
+- `canned: true` marks a fixed line (hand-off, helpline, refusal, lead confirmation),
+  not the model's words; the backend leaves those out of the history it sends back.
 - The first handoff returns an honest pending message. Subsequent requests while
   pending/active return null reply fields. The caller must not send a message when
-  these are null. A human claim/release race suppresses stale AI responses; other
-  concurrent generation conflicts return 409 and should be retried serially.
+  these are null. A human claim/release race suppresses stale AI responses. When
+  the customer wrote again while a reply was generated, that older reply returns
+  `intent: "superseded"` with null reply fields (send nothing; the newer request
+  answers both). Other rare generation conflicts return 409 and should be retried.
+- `message_id` (the Meta mid or comment id) makes a retried delivery of the newest
+  message neither stored twice nor a new turn.
 
 A reply is generated, not sent: this service never sends DMs, cancels orders or
 contacts agents itself. Channel delivery is the integrating backend's responsibility.
@@ -75,9 +94,9 @@ channel and sender; identities across channels are not assumed to be the same pe
 
 Each message and preference expires 20 days after it was saved. Reading a preference
 or continuing the chat does not refresh its timestamp. Product/lead observations also
-expire. Inactive conversation records expire after 20 days. Cleanup runs at startup,
-every 60 seconds while running, and before every store operation; expired data is
-never supplied to the model. If the service is off, physical cleanup resumes on
+expire. Inactive conversation records expire after 20 days. Cleanup runs at startup
+and every 60 seconds while running; reads skip anything past its expiry in between,
+so expired data is never supplied to the model. If the service is off, physical cleanup resumes on
 startup. SQLite secure deletion is enabled locally; Postgres uses row deletion and normal vacuum/WAL lifecycle. Independently managed backups must use
 the same retention policy.
 
@@ -180,8 +199,18 @@ stop a made-up price, fact or link. Run it after every prompt or guard change. C
 preference evidence, queue lifecycle, generation races, safety and provider failures.
 Successful model calls log elapsed time and input/output token usage without customer
 text. Pricing is not hardcoded; use measured tokens and the chosen model's pricing to
-set a monthly budget. The provider timeout defaults to 15 seconds per attempt, with
-at most two attempts. This is not an end-to-end response-time guarantee.
+set a monthly budget. Each model attempt may take `LLM_TIMEOUT_MS` (25 s); all attempts
+together stay within `LLM_TOTAL_BUDGET_MS` (45 s), so the backend (which waits 55 s)
+always hears back. A timeout, 429/5xx, empty answer or JSON that does not fit the
+schema is tried again while at least 6 s remain; on Gemini (the service's own key or a
+workspace's dashboard key) the second try uses `LLM_FALLBACK_MODEL` (default
+`gemini-3.6-flash`, or `gemini-flash-lite-latest` when that is already the primary);
+an OpenAI or Claude model is retried as it is. A schema miss in the model's answer is
+`invalid_output`; the SDK refusing the request we built is `provider_error:ValidationError`
+and is not retried. Gemini 3 runs with low
+thinking and its default temperature; Gemini 2.x and Claude use 0.6 for DMs and 0.2
+for public comments. Every failed attempt logs one `llm_generation_failed` line with
+provider, model, code, HTTP status and elapsed time, never customer text.
 
 Postgres integration tests require an isolated `TEST_DATABASE_URL` containing the
 backend schema. They modify test records and must never target a production database.

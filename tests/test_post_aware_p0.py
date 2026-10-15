@@ -54,24 +54,48 @@ def test_crisis_runs_before_safety_filter_and_pauses_once(monkeypatch):
 
 
 def test_soft_line_is_not_sent_twice_in_a_row(monkeypatch):
+    # No usable answer of its own, so the soft line goes out.
     monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {
-        'private_dm': 'x', 'handoff_reason': 'missing_information'})
-    first = send('delivery kab tak?')
+        'private_dm': '', 'handoff_reason': 'missing_information'})
+    first = send('delivery kab tak?', event_type='dm')
     assert first['private_dm'] and first['conversation_status'] == 'ai'
     assert first['requires_human_attention'] is True
-    second = send('aur COD?')
+    assert first['canned'] is True
+    second = send('aur COD?', event_type='dm')
     # Not the same line again, and not silence: the customer always hears back.
     assert second['private_dm'] and second['private_dm'] != first['private_dm']
     assert 'team se confirm' in second['private_dm']
     assert second['conversation_status'] == 'ai'
-    third = send('aur exchange?')
+    assert second['canned'] is True
+    third = send('aur exchange?', event_type='dm')
     assert third['private_dm'] == first['private_dm']
+
+
+def test_comments_always_get_the_soft_line(monkeypatch):
+    # Every comment is its own public thread: no swap, no silence.
+    monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {
+        'private_dm': '', 'handoff_reason': 'missing_information'})
+    first = send('delivery kab tak?', event_type='comment')
+    second = send('aur COD?', event_type='comment')
+    assert first['public_reply'] == second['public_reply'] == first['private_dm'] == second['private_dm']
+    assert 'confirm' in first['private_dm']
 
 
 def test_model_down_line_is_not_repeated(monkeypatch):
     monkeypatch.setattr(endpoints.gemini_service, 'generate', Mock(side_effect=LLMUnavailable()))
-    assert 'mil gaya' in send('size kya hai?')['private_dm']
-    assert send('hello?')['private_dm'] is None
+    assert 'mil gaya' in send('size kya hai?', event_type='dm')['private_dm']
+    assert send('hello?', event_type='dm')['private_dm'] is None
+
+
+def test_model_down_never_silences_a_comment(monkeypatch):
+    monkeypatch.setattr(endpoints.gemini_service, 'generate', Mock(side_effect=LLMUnavailable('down', 'llm_timeout')))
+    for text in ('size kya hai?', 'price?', 'hello?'):
+        reply = send(text, event_type='comment')
+        assert 'mil gaya' in reply['private_dm']
+        assert reply['public_reply'] == reply['private_dm']
+        assert reply['handoff_reason'] == 'generation_unavailable'
+        assert reply['reasoning'] == 'llm_timeout'
+        assert reply['canned'] is True
 
 
 def test_pausing_handoff_is_friendly_and_in_hinglish(monkeypatch):

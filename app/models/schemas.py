@@ -24,7 +24,8 @@ class EmojiDensityEnum(str, Enum):
 class BrandPersona(BaseModel):
     brand_name: str
     tone: ToneEnum = ToneEnum.FRIENDLY
-    language_mode: LanguageModeEnum = LanguageModeEnum.HINGLISH
+    # AUTO: the customer's latest message decides; HINGLISH/ENGLISH only lean.
+    language_mode: LanguageModeEnum = LanguageModeEnum.AUTO
     emoji_density: EmojiDensityEnum = EmojiDensityEnum.MODERATE
     custom_instructions: Optional[str] = None
     dm_cta_text: Optional[str] = "Check your DM for exclusive checkout link! 🛍️"
@@ -85,6 +86,8 @@ class LeadField(BaseModel):
     key: str
     label: str
     ask: str = ""
+    # The same question in English, for customers who write English.
+    ask_en: str = ""
 
 class Playbook(BaseModel):
     goal: str = "ORDER"  # ORDER | LEAD | BOOKING
@@ -156,6 +159,11 @@ class GenerateReplyRequest(BaseModel):
     # The seller's local date (YYYY-MM-DD), so "kal" and "15 Nov" mean the right
     # day. India's date when missing.
     today: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    # Meta's id for this DM or comment: a wake-up retry of the same message is
+    # not stored (or answered as a new turn) twice.
+    message_id: Optional[str] = Field(default=None, max_length=256)
+    # Display name or @username as Meta reports it (untrusted).
+    customer_name: Optional[str] = Field(default=None, max_length=100)
 
 class GenerateReplyResponse(BaseModel):
     public_reply: Optional[str] = None
@@ -174,6 +182,9 @@ class GenerateReplyResponse(BaseModel):
     lead_interested: bool = False
     # PRODUCTS or SERVICES once the customer has made clear which they want.
     offering_type: Optional[str] = None
+    # A fixed line (hand-off, helpline, refusal), not the model's own words: the
+    # backend keeps it out of the history it sends back, so it is never copied.
+    canned: bool = False
 
 
 class PreferenceEvidence(BaseModel):

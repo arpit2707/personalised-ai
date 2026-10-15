@@ -18,14 +18,19 @@ CREATE TABLE IF NOT EXISTS ai.conversations (
 CREATE TABLE IF NOT EXISTS ai.messages (
     id BIGSERIAL PRIMARY KEY,
     conversation TEXT NOT NULL REFERENCES ai.conversations(id) ON DELETE CASCADE,
-    role TEXT NOT NULL, text TEXT NOT NULL, created DOUBLE PRECISION NOT NULL
+    role TEXT NOT NULL, text TEXT NOT NULL, created DOUBLE PRECISION NOT NULL,
+    message_id TEXT
 );
+ALTER TABLE ai.messages ADD COLUMN IF NOT EXISTS message_id TEXT;
 CREATE INDEX IF NOT EXISTS conversation_message_history ON ai.messages(conversation, created);
 CREATE TABLE IF NOT EXISTS ai.preferences (
     conversation TEXT NOT NULL REFERENCES ai.conversations(id) ON DELETE CASCADE,
     key TEXT NOT NULL, value TEXT NOT NULL, created DOUBLE PRECISION NOT NULL,
     PRIMARY KEY(conversation, key)
 );
+CREATE INDEX IF NOT EXISTS conversation_message_expiry ON ai.messages(created);
+CREATE INDEX IF NOT EXISTS conversation_preference_expiry ON ai.preferences(created);
+CREATE INDEX IF NOT EXISTS conversation_expiry ON ai.conversations(updated);
 '''
 
 
@@ -81,7 +86,8 @@ class PgConversationDatabase:
     def transaction(self):
         with self.pool().connection() as conn:
             # Equivalent to SQLite's BEGIN IMMEDIATE for these short state changes.
-            # Model/network calls always happen outside this transaction.
+            # Model/network calls always happen outside this transaction, and the
+            # retention purge runs in its own (purge()), so the lock is held briefly.
             conn.execute('SELECT pg_advisory_xact_lock(72422102)')
             yield ConnectionAdapter(conn)
 

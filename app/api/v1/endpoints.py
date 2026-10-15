@@ -1,3 +1,7 @@
+import json
+import logging
+import os
+import traceback
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List
 from app.core.auth import authenticated_brand, require_brand
@@ -11,10 +15,25 @@ from app.services.conversation_store import conversation_store, ConversationConf
 from app.services.handoff_policy import handoff_reason, unresolved_feedback, interested
 from app.services import catalog_reply
 from app.services.crisis import is_crisis, crisis_reply, CRISIS_PUBLIC
-from app.services.handoff_texts import FLAG_REASONS, lead_confirmation, is_handoff_line
-import json
+from app.services.handoff_texts import FLAG_REASONS, lead_confirmation, is_fixed_line, is_handoff_line
+from app.services.fact_guard import soft_answer_problems
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Soft hand-offs whose checked answer can still go out: the seller only sees a flag.
+ANSWERABLE_REASONS = {'missing_information', 'conflicting_information'}
+# A bug in our own checks after a good model answer, not a model failure.
+INTERNAL_ERRORS = (ValueError, TypeError, AttributeError, KeyError, IndexError)
+_APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+class Superseded(Exception):
+    """The customer wrote again while this reply was generated; the newer request answers."""
+
+    def __init__(self, row):
+        super().__init__(row['id'])
+        self.row = row
 
 
 @router.get("/health")
@@ -62,15 +81,19 @@ def paused(row):
 
 def complete(req, row, **kwargs):
     try:
-        return conversation_store.finish(req.brand_id, row, **kwargs)
+        return conversation_store.finish(req.brand_id, row, event_type=req.event_type,
+                                         language=catalog_reply.customer_language(req), **kwargs)
     except ConversationConflict:
         current = conversation_store.detail(req.brand_id, row['id'])
         if current['status'] != 'ai':
             return current, None
+        if conversation_store.answered_later(req.brand_id, row):
+            # Two quick messages: the newer request sees both and answers once.
+            raise Superseded(current)
         raise HTTPException(409, "Conversation changed during generation; discard this response and retry")
 
 
-def handoff(req, row, reason, product=None):
+def handoff(req, row, reason, product=None, code=None):
     current, text = complete(req, row, reason=reason, product=product,
                              interested=reason == 'purchase_assistance', source_text=req.message_text)
     # Soft reasons keep the chat with the AI but still flag it for the seller.
@@ -78,12 +101,70 @@ def handoff(req, row, reason, product=None):
     return GenerateReplyResponse(public_reply=text if req.event_type == 'comment' else None,
                                  private_dm=text, intent='human_handoff', action='HANDOFF',
                                  sentiment='negative' if reason in ('complaint', 'order_support') else 'neutral',
-                                 **state)
+                                 reasoning=code, **state)
+
+
+def unavailable(req, row, code, product=None):
+    """The "message mil gaya" hand-off, with why in reasoning (llm_timeout, invalid_output...)."""
+    return handoff(req, row, 'generation_unavailable', product=product, code=code)
+
+
+def internal_error(exc):
+    """Logs where our own code broke (type, file:line), never the message or the exception text."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    last = frames[-1] if frames else None
+    # The last frame may sit inside pydantic; the last one of ours says which check broke.
+    ours = next((f for f in reversed(frames) if f.filename.startswith(_APP_DIR)), last)
+
+    def where(frame):
+        return f"{os.path.basename(frame.filename)}:{frame.lineno}" if frame else "unknown"
+    logger.error("reply_internal_error type=%s at=%s in=%s:%s", type(exc).__name__, where(last),
+                 where(ours), ours.name if ours else "unknown")
+    return 'internal_error'
+
+
+def soft_answer_rejected(req, dm, public=None):
+    """True when a missing/conflicting-information answer may not go out in the model's words.
+
+    Only the kind of problem is logged ("stock", "arrival_time", "no_deferral"),
+    never the text.
+    """
+    try:
+        problems = soft_answer_problems(req, dm, public)
+    except INTERNAL_ERRORS as exc:
+        # A bug in this check sends the safe line, not an unchecked answer.
+        internal_error(exc)
+        return True
+    if problems:
+        logger.info("soft_answer_rejected why=%s", ",".join(problems))
+    return bool(problems)
+
+
+def answered_before(req, memory):
+    """Whether the chat already had a real answer that "still not helpful" can refer to.
+
+    The backend's thread wins when it sends one: it has the seller's replies and
+    leaves the canned hand-off lines out.
+    """
+    if req.recent_messages:
+        return any(m.sender == 'business' for m in req.recent_messages)
+    return any(m['role'] == 'assistant' for m in memory['history'])
 
 
 @router.post("/generate-reply", response_model=GenerateReplyResponse)
 def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated_brand)):
     require_brand(req.brand_id, brand)
+    try:
+        response = reply_to(req, brand)
+    except Superseded as exc:
+        # Nothing to send, no notice: the newer message's reply covers this one.
+        return GenerateReplyResponse(intent='superseded',
+                                     **{**state_fields(exc.row), 'requires_human_attention': False})
+    response.canned = is_fixed_line(response.private_dm or response.public_reply)
+    return response
+
+
+def reply_to(req, brand):
     # Crisis first, even before the safety filter: "zeher kha lungi" needs a
     # helpline, not a refusal.
     if is_crisis(req.message_text):
@@ -100,7 +181,7 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
     # The current message is already supplied separately in the generation prompt.
     if memory['history'] and memory['history'][-1]['role'] == 'user':
         memory['history'].pop()
-    failed = unresolved_feedback(req.message_text) and any(m['role'] == 'assistant' for m in memory['history'])
+    failed = unresolved_feedback(req.message_text) and answered_before(req, memory)
     reason = handoff_reason(req.message_text)
     sku = req.post_context.tagged_product_sku if req.post_context else None
     # "Discount do", "itna mehenga kyu", "booking karwa do": the AI answers and
@@ -126,35 +207,48 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
         matched = catalog_store.search_products(brand, req.message_text, limit=1)
         target = matched[0] if matched else None
     persona = req.brand_persona or BrandPersona(brand_name='Reel2Real Brand')
+    product = target.sku if target else None
     user_prompt = prompt_assembler.build_user_prompt(
-        req.message_text, req.channel_type, req.event_type, req.post_context, target, memory)
+        req.message_text, req.channel_type, req.event_type, req.post_context, target, memory, req.customer_name)
     try:
         raw = gemini_service.generate(prompt_assembler.build_system_prompt(persona), user_prompt, req.message_text,
-                                     req.llm)
-        if raw.get('intent') == 'safety_refusal' or contains_blocked_content(raw):
-            return safety_refusal(req)
+                                     req.llm, req.event_type)
+    except LLMUnavailable as exc:
+        return unavailable(req, row, exc.code, product)
+    if isinstance(raw, dict) and (raw.get('intent') == 'safety_refusal' or contains_blocked_content(raw)):
+        return safety_refusal(req)
+    try:
         output = ModelReply.model_validate(raw)
-        if not output.private_dm.strip() and not output.handoff_reason:
-            raise ValueError('Empty reply')
-    except (LLMUnavailable, ValueError, TypeError, AttributeError):
-        return handoff(req, row, 'generation_unavailable', product=target.sku if target else None)
+    except ValueError:
+        return unavailable(req, row, 'invalid_output', product)
+    if not output.private_dm.strip() and not output.handoff_reason:
+        return unavailable(req, row, 'empty_output', product)
     if output.handoff_reason in FLAG_REASONS:
         flag = output.handoff_reason
-    elif output.handoff_reason:
-        return handoff(req, row, output.handoff_reason, product=target.sku if target else None)
+    elif output.handoff_reason and output.handoff_reason not in ANSWERABLE_REASONS:
+        return handoff(req, row, output.handoff_reason, product=product)
     # The older one-product path gets the same checks as catalog replies: no
     # price, fact or link the product (or the customer) did not give.
-    shadow = req.model_copy(update={'offerings': [catalog_reply.offering_from_product(target)] if target else []})
-    public = catalog_reply.public_text(req, output.public_reply) if req.event_type == 'comment' else None
-    found = catalog_reply.blocked(shadow, [target.sku] if target else [], public, output.private_dm)
+    try:
+        shadow = req.model_copy(update={'offerings': [catalog_reply.offering_from_product(target)] if target else []})
+        public = catalog_reply.public_text(req, output.public_reply) if req.event_type == 'comment' else None
+        found = catalog_reply.blocked(shadow, [product] if target else [], public, output.private_dm)
+    except INTERNAL_ERRORS as exc:
+        return unavailable(req, row, internal_error(exc), product)
     if found:
-        response = handoff(req, row, 'missing_information', product=target.sku if target else None)
+        response = handoff(req, row, 'missing_information', product=product)
         response.intent = found[0]
         return response
+    if output.handoff_reason in ANSWERABLE_REASONS:
+        if not output.private_dm.strip() or is_handoff_line(output.private_dm) \
+                or soft_answer_rejected(shadow, output.private_dm, public):
+            return handoff(req, row, output.handoff_reason, product=product)
+        # Its checked answer goes out; the seller sees the chat flagged.
+        flag = flag or output.handoff_reason
     output.public_reply = public
-    failed = failed or (output.previous_answer_unresolved and any(m['role'] == 'assistant' for m in memory['history']))
-    current, text = complete(req, row, reply=output.private_dm, product=target.sku if target else None,
-                             interested=bool(flag) or output.buying_interest or interested(req.message_text),
+    failed = failed or (output.previous_answer_unresolved and answered_before(req, memory))
+    current, text = complete(req, row, reply=output.private_dm, product=product,
+                             interested=flag in FLAG_REASONS or output.buying_interest or interested(req.message_text),
                              unresolved=failed, preferences=[p.model_dump() for p in output.preferences],
                              source_text=req.message_text, flag=flag)
     if current['status'] != 'ai':
@@ -190,26 +284,43 @@ def offering_reply(req, row, memory, failed, flag=None):
     # retained history is added below.
     system = catalog_reply.build_system_prompt(persona, req)
     prompt = catalog_reply.build_user_prompt(req)
+    answered = answered_before(req, memory)
     if req.recent_messages:
         # The backend's thread already carries the history (seller replies too).
         memory = {**memory, 'history': []}
     prompt += '\nRetained conversation data:\n' + json.dumps(memory, ensure_ascii=False)
     try:
-        raw = gemini_service.generate(system, prompt, req.message_text, req.llm)
-        if contains_blocked_content(raw) or raw.get('intent') == 'safety_refusal':
-            return safety_refusal(req)
+        raw = gemini_service.generate(system, prompt, req.message_text, req.llm, req.event_type)
+    except LLMUnavailable as exc:
+        return unavailable(req, row, exc.code)
+    if isinstance(raw, dict) and (contains_blocked_content(raw) or raw.get('intent') == 'safety_refusal'):
+        return safety_refusal(req)
+    try:
         output = ModelReply.model_validate(raw)
+    except ValueError:
+        return unavailable(req, row, 'invalid_output')
+    try:
         result = catalog_reply.finalize(req, output.model_dump())
-    except (LLMUnavailable, ValueError, TypeError, AttributeError):
-        return handoff(req, row, 'generation_unavailable')
-    if output.handoff_reason in FLAG_REASONS:
-        flag = output.handoff_reason
+    except INTERNAL_ERRORS as exc:
+        return unavailable(req, row, internal_error(exc))
+    reason = output.handoff_reason
     guarded = result.intent in ('price_blocked', 'fact_blocked')
+    # Passed every guard and is the model's own text, not the fallback line.
+    usable = not guarded and bool(result.private_dm.strip()) and not is_handoff_line(result.private_dm)
+    # "Main team se confirm karke batati hoon, tab tak..." in the model's own words
+    # reads better than the canned line; the seller still sees the chat flagged.
+    # It must not answer the point it said nobody gave it ("haan, kal tak pahunch jayega").
+    soft_answer = reason in ANSWERABLE_REASONS and usable and \
+        not soft_answer_rejected(req, result.private_dm, result.public_reply)
+    if reason in FLAG_REASONS:
+        flag = reason
+    elif soft_answer:
+        flag = flag or reason
     if flag and not guarded and result.action == 'HANDOFF':
         # A purchase chat stays with the AI: its checked answer goes out.
         result = result.model_copy(update={'action': 'ANSWER', 'requires_human_attention': False})
-    if result.requires_human_attention or (output.handoff_reason and output.handoff_reason not in FLAG_REASONS):
-        reason = output.handoff_reason if output.handoff_reason not in (None, *FLAG_REASONS) else 'missing_information'
+    if result.requires_human_attention or (reason and reason not in FLAG_REASONS and not soft_answer):
+        reason = reason if reason not in (None, *FLAG_REASONS) else 'missing_information'
         response = handoff(req, row, reason)
         response.offering_ids = result.offering_ids
         response.collected_fields = result.collected_fields
@@ -217,13 +328,13 @@ def offering_reply(req, row, memory, failed, flag=None):
         if result.intent in ('price_blocked', 'fact_blocked'):
             response.intent = result.intent
         return response
-    unresolved = failed or (output.previous_answer_unresolved and any(m['role'] == 'assistant' for m in memory['history']))
+    unresolved = failed or (output.previous_answer_unresolved and answered)
     reply = result.private_dm
     if result.action == 'CREATE_LEAD' and (not reply.strip() or is_handoff_line(reply)):
         # Every detail is in: a confirmation, never the "in the queue" line.
-        reply = lead_confirmation(req.message_text)
+        reply = lead_confirmation(req.message_text, catalog_reply.customer_language(req))
     current, text = complete(req, row, reply=reply,
-                             interested=bool(flag) or output.buying_interest or result.action == 'CREATE_LEAD'
+                             interested=flag in FLAG_REASONS or output.buying_interest or result.action == 'CREATE_LEAD'
                              or interested(req.message_text),
                              unresolved=unresolved, preferences=[p.model_dump() for p in output.preferences],
                              source_text=req.message_text, flag=flag)

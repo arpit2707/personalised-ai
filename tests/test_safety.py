@@ -1,5 +1,6 @@
 from unittest.mock import patch
 import pytest
+from app.core.config import settings
 from app.services.guardrails import contains_blocked_content, SAFETY_REFUSAL
 from app.services.gemini_service import GeminiService
 
@@ -39,8 +40,7 @@ def test_input_never_calls_model():
 
 def test_output_is_replaced():
     service = GeminiService()
-    with patch("app.services.gemini_service.settings") as settings, patch.object(service, "_client") as client:
-        settings.GEMINI_API_KEY = "test"
+    with patch.object(settings, "GEMINI_API_KEY", "test"), patch.object(service, "_client") as client:
         client.models.generate_content.return_value.text = '{"private_dm": "porn details"}'
         result = service.generate("Brand voice", "shirt price?")
         assert result["private_dm"] == SAFETY_REFUSAL
