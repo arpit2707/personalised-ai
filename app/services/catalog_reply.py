@@ -10,7 +10,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from app.models.schemas import (BrandPersona, EmojiDensityEnum, GenerateReplyRequest, GenerateReplyResponse,
-                                LanguageModeEnum, OfferingContext, ToneEnum)
+                                LanguageModeEnum, OfferingContext, OfferingVariant, ToneEnum)
 from app.services.crisis import language_of
 from app.services.fact_guard import unsupported_facts
 from app.services.field_check import checked_value, today_in_india
@@ -335,7 +335,7 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
     action = str(raw.get("action") or "ANSWER").upper()
     if action not in ACTIONS:
         action = "ANSWER"
-    public = _without_links(_untagged(raw.get("public_reply"))) if req.event_type == "comment" else None
+    public = public_text(req, raw.get("public_reply")) if req.event_type == "comment" else None
     dm = str(raw.get("private_dm")).strip()
     collected = _checked_fields(req, raw.get("collected_fields"))
     dm, action = _lead_progress(req, collected, dm, action)
@@ -353,35 +353,99 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
         collected_fields=collected,
     )
 
-    bad = unknown_figures(req, response.public_reply, response.private_dm)
+    found = blocked(req, response.offering_ids, response.public_reply, response.private_dm)
+    if found and found[0] == "link_blocked":
+        return fallback(req)
+    if found:
+        intent, why = found
+        safe = handoff_text(intent, req.message_text)
+        return GenerateReplyResponse(
+            public_reply=safe if req.event_type == "comment" else None,
+            private_dm=safe,
+            intent=intent,
+            requires_human_attention=True,
+            action="HANDOFF",
+            offering_ids=response.offering_ids,
+            reasoning=why[:300],
+        )
+    return response
+
+
+def blocked(req: GenerateReplyRequest, offering_ids: List[str], public: Optional[str],
+            dm: Optional[str]) -> Optional[tuple]:
+    """(intent, reason) when the reply states something no catalog, business detail or customer gave."""
+    bad = unknown_figures(req, public, dm)
     if bad:
-        safe = handoff_text("price_blocked", req.message_text)
-        return GenerateReplyResponse(
-            public_reply=safe if req.event_type == "comment" else None,
-            private_dm=safe,
-            intent="price_blocked",
-            requires_human_attention=True,
-            action="HANDOFF",
-            offering_ids=response.offering_ids,
-            reasoning=f"Blocked: reply quoted {bad} which is not in the catalog",
-        )
-    facts = unsupported_facts(req, response.offering_ids, response.public_reply, response.private_dm)
+        return "price_blocked", f"Blocked: reply quoted {bad} which is not in the catalog"
+    if _prices_an_unshown_item(req, offering_ids, public, dm):
+        return "fact_blocked", "Blocked: priced an item the post is not linked to and the customer did not name"
+    facts = unsupported_facts(req, offering_ids, public, dm)
     if facts:
-        safe = handoff_text("missing_information", req.message_text)
-        return GenerateReplyResponse(
-            public_reply=safe if req.event_type == "comment" else None,
-            private_dm=safe,
-            intent="fact_blocked",
-            requires_human_attention=True,
-            action="HANDOFF",
-            offering_ids=response.offering_ids,
-            reasoning=f"Blocked: reply stated {facts[:3]} which the catalog and business details do not say"[:300],
-        )
+        return "fact_blocked", f"Blocked: reply stated {facts[:3]} which the catalog and business details do not say"
     allowed_links = {_link_key(l) for l in allowed_link_set(req)}
     allowed_links.update(_link_key(l) for l in _LINK.findall(_seller_link_text(req)))
-    if any(_link_key(link) not in allowed_links for link in _LINK.findall(response.private_dm)):
-        return fallback(req)
-    return response
+    if any(_link_key(link) not in allowed_links for text in (public, dm) if text for link in _LINK.findall(text)):
+        return "link_blocked", "Blocked: link not in the catalog"
+    return None
+
+
+def _words(text: Optional[str]) -> set:
+    return set(re.findall(r"[a-z\u0900-\u097f]{4,}", (text or "").casefold()))
+
+
+def _prices_an_unshown_item(req: GenerateReplyRequest, offering_ids: List[str], public: Optional[str],
+                            dm: Optional[str]) -> bool:
+    """A price for "ye wala" on a post no item is linked to, for an item nobody named.
+
+    Search can match a similar item; quoting its price as the post's would be a
+    wrong promise, so the seller confirms which item the post shows.
+    """
+    offerings = req.offerings or []
+    if not req.post_context or any(o.linked_to_post or o.match == "post" for o in offerings):
+        return False
+    if not (extract_amounts(public) or extract_amounts(dm)):
+        return False
+    named = _words(req.message_text) | _words(req.post_context.caption) | _words(req.post_context.note)
+    for m in req.recent_messages:
+        if m.sender == "customer":
+            named |= _words(m.text)
+    priced = [o for o in offerings if o.id in offering_ids] or offerings
+    return not any(_words(o.title) & named for o in priced)
+
+
+_ASKED_PRICE = re.compile(
+    r"\b(?:price|prices|pp|kitne|kitna|kitni|cost|rate|rates|daam|dam|kimat|keemat|charges?|fees?|how\s+much|budget|mrp)\b"
+    r"|₹|\brs\b", re.I)
+
+
+def public_text(req: GenerateReplyRequest, text: Optional[str]) -> Optional[str]:
+    """A public comment reply as the rules say: no tag, no link, no price unless asked, short."""
+    text = _without_links(_untagged(text))
+    if not text:
+        return None
+    sentences = [x for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
+    if not _ASKED_PRICE.search(req.message_text):
+        sentences = [x for x in sentences if not extract_amounts(x)]
+    if not sentences:
+        return None
+    kept: List[str] = []
+    for sentence in sentences:
+        if kept and len(" ".join(kept + [sentence]).split()) > 25:
+            break
+        kept.append(sentence)
+    words = " ".join(kept).split()
+    return " ".join(words[:25]) + ("…" if len(words) > 25 else "")
+
+
+def offering_from_product(product: Any) -> OfferingContext:
+    """The older one-product request in the shape the guards read."""
+    return OfferingContext(
+        id=product.sku, title=product.title, description=product.description or None,
+        price_label=f"{product.currency} {product.price:g}", price_min=product.price,
+        action_url=product.checkout_url or None,
+        attributes={"colors": product.colors} if product.colors else None,
+        variants=[OfferingVariant(label=size, in_stock=product.in_stock) for size in product.sizes],
+    )
 
 
 # Full URLs, www. links, and bare shop domains such as "wa.me/91..." or

@@ -45,6 +45,7 @@ _TEXTS = {
 }
 _TEXTS["conflicting_information"] = _TEXTS["missing_information"]
 _TEXTS["price_blocked"] = _TEXTS["missing_information"]
+_TEXTS["fact_blocked"] = _TEXTS["missing_information"]
 
 LEAD_CONFIRMATION = (
     "Thank you! Our team will contact you to confirm the details.",

@@ -137,6 +137,16 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
         return handoff(req, row, 'generation_unavailable', product=target.sku if target else None)
     if output.handoff_reason:
         return handoff(req, row, output.handoff_reason, product=target.sku if target else None)
+    # The older one-product path gets the same checks as catalog replies: no
+    # price, fact or link the product (or the customer) did not give.
+    shadow = req.model_copy(update={'offerings': [catalog_reply.offering_from_product(target)] if target else []})
+    public = catalog_reply.public_text(req, output.public_reply) if req.event_type == 'comment' else None
+    found = catalog_reply.blocked(shadow, [target.sku] if target else [], public, output.private_dm)
+    if found:
+        response = handoff(req, row, 'missing_information', product=target.sku if target else None)
+        response.intent = found[0]
+        return response
+    output.public_reply = public
     failed = failed or (output.previous_answer_unresolved and any(m['role'] == 'assistant' for m in memory['history']))
     current, text = complete(req, row, reply=output.private_dm, product=target.sku if target else None,
                              interested=output.buying_interest or interested(req.message_text), unresolved=failed,

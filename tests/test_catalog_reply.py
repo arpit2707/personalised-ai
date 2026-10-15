@@ -372,3 +372,57 @@ def test_prompt_has_today():
 
     prompt = catalog_reply.build_user_prompt(GenerateReplyRequest.model_validate({**MAKEUP, "today": "2026-10-15"}))
     assert "TODAY: 2026-10-15 (Thursday)" in prompt
+
+
+# ---------------------------------------------------------------- comments, posts, older path
+
+def test_public_reply_drops_price_nobody_asked_for_and_stays_short(monkeypatch):
+    payload = {**MAKEUP, "message_text": "Wow so pretty 😍", "sender_id": "pub-1"}
+    long_public = ("Thank you so much! Bridal full look ₹18,000 se start hota hai. " + "Bahut pyaar mila is look ko " * 6).strip()
+    data = post(payload, {"public_reply": long_public, "private_dm": "Bridal full look ₹18,000 se start.",
+                          "action": "ANSWER", "offering_ids": ["off_bridal"]}, monkeypatch)
+    assert "18,000" not in data["public_reply"]
+    assert len(data["public_reply"].split()) <= 25
+    assert "18,000" in data["private_dm"]
+
+
+def test_public_reply_keeps_price_when_asked(monkeypatch):
+    payload = {**MAKEUP, "message_text": "price?", "sender_id": "pub-2"}
+    data = post(payload, {"public_reply": "Bridal full look ₹18,000 se start!", "private_dm": "₹18,000 se start.",
+                          "action": "ANSWER"}, monkeypatch)
+    assert data["public_reply"] == "Bridal full look ₹18,000 se start!"
+
+
+def test_price_for_an_item_the_post_does_not_show_is_held(monkeypatch):
+    # No item is linked to this post; search found a similar one.
+    offering = {**MAKEUP["offerings"][0], "linked_to_post": False, "match": "search"}
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "price?", "sender_id": "post-1", "offerings": [offering],
+               "post_context": {"post_id": "ig_9", "caption": "Party ready ✨"}}
+    data = post(payload, {"private_dm": "Bridal full look ₹18,000 se start.", "action": "ANSWER",
+                          "offering_ids": ["off_bridal"]}, monkeypatch)
+    assert data["action"] == "HANDOFF"
+    assert "18,000" not in data["private_dm"]
+
+
+def test_price_for_an_item_the_customer_named_is_sent(monkeypatch):
+    offering = {**MAKEUP["offerings"][0], "linked_to_post": False, "match": "search"}
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "bridal look ka price?", "sender_id": "post-2",
+               "offerings": [offering], "post_context": {"post_id": "ig_9", "caption": "Party ready ✨"}}
+    data = post(payload, {"private_dm": "Bridal full look ₹18,000 se start.", "action": "ANSWER",
+                          "offering_ids": ["off_bridal"]}, monkeypatch)
+    assert data["action"] == "ANSWER"
+
+
+def test_older_one_product_path_is_guarded_too(monkeypatch):
+    from app.api.v1 import endpoints
+    from app.models.schemas import ProductInfo
+
+    endpoints.catalog_store.upsert_product("test_brand", ProductInfo(
+        sku="legacy-1", title="Cotton Shirt", price=799, checkout_url="https://shop.example/shirt"))
+    monkeypatch.setattr(gemini_service, "generate", lambda *_: {"private_dm": "Cotton Shirt sirf 599 me!",
+                                                                "public_reply": None})
+    res = client.post("/api/v1/generate-reply", json={
+        "brand_id": "test_brand", "sender_id": "legacy-u", "message_text": "shirt price?", "event_type": "dm",
+        "post_context": {"post_id": "p", "tagged_product_sku": "legacy-1"}}).json()
+    assert res["intent"] == "price_blocked"
+    assert "599" not in (res["private_dm"] or "")
