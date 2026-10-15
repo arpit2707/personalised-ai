@@ -89,19 +89,43 @@ text is supplied separately. Preferences are extracted during AI-handled turns.
 
 ## Strict reply safety
 
-Sexual, racial, harassment, chemical, poison and terrorism topics are broadly blocked,
-including benign mentions such as chemical-free products. The exact refusal is:
+Only clear harm is refused: sexual or pornographic content, racism, terrorism, named
+weapon agents, and making or using a bomb or poison ("bomb kaise banaye", "kisi ko
+zeher"). Everyday shopping words that merely sound alarming are answered normally:
+"Ethnic wear hai?", "Bombay delivery?", "isme chemical hai?", "ye lehenga bomb hai".
+A customer reporting harassment goes to the seller as a complaint. The exact refusal is:
 
 `sorry can't help you in that`
 
-Input, persona, post/product context, retained context and generated output are
-checked. Refusal takes priority over complaint/sales routing, uses no brand styling,
-and does not create a sales lead. DM refusals populate only `private_dm`. There is
-currently no merchant option to disable the policy. Catalog storage/search are
-backend data APIs, not conversational replies.
+The customer's message and the generated output are checked; seller catalog text is
+not. Crisis messages get helplines first. Refusal takes priority over complaint/sales
+routing, uses no brand styling, and does not create a sales lead. DM refusals populate
+only `private_dm`.
 
 This remains lexical screening plus model instructions, not a certified semantic
 moderator or a guarantee against every language, paraphrase or adversarial bypass.
+
+## Facts the reply may state
+
+Every reply is checked in code before it is returned (`catalog_reply.blocked`); a
+reply that fails is replaced by the "team will confirm this" line and flagged for the seller:
+
+- Prices: any amount (₹/Rs, "2500 ka", "sirf 1499 me", "2.5k", "2 hazar", "rupaye")
+  must be a catalog price, an amount in the item text or business policies/FAQs, one
+  the customer wrote, or a price times a quantity the customer gave ("200 log").
+- Percentages ("20% off", "50% advance") must come from the catalog, business details,
+  the post caption/note or the customer.
+- Delivery times, COD, free/same-day delivery, returns/exchange and warranty must be in
+  the seller's own text; the customer asking "COD hai?" is not a source.
+- An option marked `in_stock: false` is never called available.
+- Links (with or without `https://`, including `wa.me/` and bare shop domains) must be
+  item links, Spotlight permalinks or links in the business details.
+- Public comment replies carry no link, no price unless the commenter asked, and at
+  most 25 words.
+- A price for "ye wala" on a post with no linked item is held unless the customer,
+  caption or chat names the item.
+
+The backend runs the same price and percentage check again before sending.
 
 ## Catalog storage and compatibility
 
@@ -129,19 +153,30 @@ The remote catalog-playbooks branch is integrated: requests can carry `business`
 authoritative for that request; this path does not query an unrelated product catalog.
 Both paths enforce the same safety, 20-day memory, queue and AI-pause policy.
 Responses include `action`, `offering_ids`, and `collected_fields` for backend compatibility.
-Unknown prices/links route to humans. Collected fields must appear in the current
-customer message. CREATE_LEAD suggestions become human handoff, never an automatic
-order or booking action. Provider failure also hands off instead of claiming a DM was sent.
+Unknown prices, facts and links route to humans (see above). A collected lead detail
+must be something the customer wrote, compared by kind: dates are read from their words
+("15 Nov", "15/11", "kal", "agle Sunday") against `today` (the seller's date, sent by
+the backend; India's date otherwise), phones by digits, budgets by amount and cities with
+their old names (Bombay, Calcutta). `CREATE_LEAD` stands only when every lead detail is
+known, else the reply asks for what is missing; it never places an order or confirms a
+booking. Provider failure also hands off instead of claiming a DM was sent.
 
-Untimestamped external `recent_messages` and `goal_state` are accepted for compatibility
-but not forwarded to the model, since they cannot enforce the agreed retention period.
-The service uses its own retained conversation context. Backend-selected offering IDs
+The backend's `recent_messages` and `goal_state` (details already collected, stage) are
+part of the prompt; the service's own retained memory is added when the backend sends
+no history. Backend-selected offering IDs
 are returned to the caller; customer identity across channels is not merged.
 
 ## Validation and observability
 
 Run `.\.venv\Scripts\python.exe -m pytest -q`. Tests use temporary databases and mocked
-LLM calls, never the configured real API key. Coverage includes expiry, isolation,
+LLM calls, never the configured real API key. To see how the real model does, run the eval set
+(`scripts/eval_cases.json`: boutique, salon, caterer and homestay cases) against it:
+
+    GEMINI_API_KEY=... python scripts/eval_replies.py
+    python scripts/eval_replies.py --provider CLAUDE --model <model> --api-key <key>
+
+It prints each failed case with the reply, the pass rate, and how often a guard had to
+stop a made-up price, fact or link. Run it after every prompt or guard change. Coverage includes expiry, isolation,
 preference evidence, queue lifecycle, generation races, safety and provider failures.
 Successful model calls log elapsed time and input/output token usage without customer
 text. Pricing is not hardcoded; use measured tokens and the chosen model's pricing to
