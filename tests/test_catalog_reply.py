@@ -426,3 +426,14 @@ def test_older_one_product_path_is_guarded_too(monkeypatch):
         "post_context": {"post_id": "p", "tagged_product_sku": "legacy-1"}}).json()
     assert res["intent"] == "price_blocked"
     assert "599" not in (res["private_dm"] or "")
+
+
+def test_totals_from_customer_quantities_and_policy_percent_are_allowed(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "sender_id": "totals-1", "message_text": "3 log ka bridal look chahiye",
+               "business": {**MAKEUP["business"], "policies": {"advance": "30% advance to block the date"}}}
+    dm = "3 looks ka total ₹54,000 se start hoga, 30% advance yaani ₹5,400 per look."
+    data = post(payload, {"private_dm": dm, "action": "ANSWER"}, monkeypatch)
+    assert data["intent"] != "price_blocked", data
+    made_up = post({**payload, "sender_id": "totals-2"}, {"private_dm": "Total ₹60,000 hoga.", "action": "ANSWER"},
+                   monkeypatch)
+    assert made_up["intent"] == "price_blocked"

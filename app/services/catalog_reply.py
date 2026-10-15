@@ -144,6 +144,15 @@ def unknown_prices(reply: Optional[str], allowed: List[float], customer_text: st
     return [n for n in extract_amounts(reply) if not any(abs(a - n) < 0.005 for a in allowed)]
 
 
+def derived_amounts(prices: List[float], customer_text: str, policy_percents: List[float]) -> List[float]:
+    """Totals the reply may work out: a price times a quantity the customer gave
+    ("200 log", "3 raat"), and a policy percentage of a price ("30% advance")."""
+    quantities = {int(n) for n in re.findall(r"(?<![\d.,])\d{1,4}(?![\d.,])", customer_text or "") if 1 < int(n) <= 5000}
+    out = [p * q for p in prices for q in quantities]
+    out += [p * pct / 100 for p in prices for pct in policy_percents if 0 < pct < 100]
+    return out
+
+
 def unknown_figures(req: GenerateReplyRequest, *replies: Optional[str]) -> List[str]:
     """Prices and percentages in the reply that no catalog item, business detail or the customer gave.
 
@@ -158,6 +167,7 @@ def unknown_figures(req: GenerateReplyRequest, *replies: Optional[str]) -> List[
     post = " ".join(t for t in ((req.post_context.caption, req.post_context.note) if req.post_context else ()) if t)
     percents = (extract_percents(business) + extract_percents(customer) + extract_percents(post)
                 + [p for o in offerings for p in extract_percents(_offering_text(o))])
+    amounts += derived_amounts(allowed_prices(offerings), customer, extract_percents(business))
     bad: List[str] = []
     for reply in replies:
         bad += [f"₹{n:g}" for n in unknown_prices(reply, amounts, customer)]
