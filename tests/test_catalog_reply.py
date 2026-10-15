@@ -300,3 +300,75 @@ def test_amount_in_item_description_is_a_catalog_price(monkeypatch):
     data = post({**MAKEUP, "event_type": "dm", "offerings": [offering]},
                 {"private_dm": "Engagement add-on ₹6,500 ka hai.", "action": "ANSWER"}, monkeypatch)
     assert data["intent"] != "price_blocked"
+
+
+# ---------------------------------------------------------------- lead details
+
+from datetime import date
+
+from app.services.field_check import checked_value, dates_in
+
+TODAY = date(2026, 10, 15)  # a Thursday
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("15 Nov ko chahiye", date(2026, 11, 15)), ("15/11", date(2026, 11, 15)), ("Dec 5", date(2026, 12, 5)),
+    ("5th December 2027", date(2027, 12, 5)), ("kal", date(2026, 10, 16)), ("parso", date(2026, 10, 17)),
+    ("agle Sunday", date(2026, 10, 25)), ("Sunday ko", date(2026, 10, 18)), ("10 Jan", date(2027, 1, 10)),
+    ("2026-11-20", date(2026, 11, 20)),
+])
+def test_dates_customers_write(text, expected):
+    assert expected in dates_in(text, TODAY)
+
+
+@pytest.mark.parametrize("key,label,value,message,stored", [
+    ("date", "Event date", "2026-11-15", "15 Nov ko function hai", "2026-11-15"),
+    ("date", "Event date", "2026-11-16", "15 Nov ko function hai", None),      # not what they said
+    ("date", "Event date", "2026-10-16", "kal chahiye", "2026-10-16"),
+    ("date", "Event date", "15 Nov", "15 Nov ko", "2026-11-15"),
+    ("date", "Travel month", "2026-12", "December me jaana hai", "2026-12"),
+    ("phone", "Phone", "9876543210", "number 98765 43210 hai", "9876543210"),
+    ("phone", "Phone", "+919876543210", "9876543210", "+919876543210"),
+    ("phone", "Phone", "9876543211", "number 98765 43210 hai", None),
+    ("city", "City", "Mumbai", "Bombay me hu", "Mumbai"),
+    ("city", "City", "Patna", "patna se", "Patna"),
+    ("city", "City", "Delhi", "Patna se", None),
+    ("people", "People", "50 people", "50 log aayenge", "50 people"),
+    ("budget", "Budget", "5000000", "budget 50 lakh hai", "5000000"),
+    ("config", "Configuration", "2 BHK", "2bhk chahiye", "2 BHK"),
+])
+def test_lead_details_are_checked_by_kind(key, label, value, message, stored):
+    assert checked_value(key, label, value, message, TODAY) == stored
+
+
+def test_iso_date_for_a_written_date_is_kept(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "15 Nov ko shaadi hai", "today": "2026-10-15"}
+    data = post(payload, {"private_dm": "Done! Team confirm karegi.", "action": "CREATE_LEAD",
+                          "collected_fields": {"date": "2026-11-15"}}, monkeypatch)
+    assert data["collected_fields"] == {"date": "2026-11-15"}
+    assert data["action"] == "CREATE_LEAD"
+
+
+def test_lead_is_not_created_while_a_detail_is_missing(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "Shaadi wali booking karni hai", "goal_state": {"fields": {}}}
+    data = post(payload, {"private_dm": "Details mil gaye, team contact karegi.", "action": "CREATE_LEAD",
+                          "collected_fields": {"date": "2026-11-15"}}, monkeypatch)
+    assert data["action"] == "ASK_FIELD"
+    assert data["collected_fields"] == {}
+    assert "mil gaye" not in data["private_dm"]
+    assert "Aapka function kis date ko hai?" in data["private_dm"]
+
+
+def test_last_detail_creates_the_lead(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "15 Nov", "today": "2026-10-15"}
+    data = post(payload, {"private_dm": "Function kis date ko hai?", "action": "ASK_FIELD",
+                          "collected_fields": {"date": "2026-11-15"}}, monkeypatch)
+    assert data["action"] == "CREATE_LEAD"
+    assert "?" not in data["private_dm"]
+
+
+def test_prompt_has_today():
+    from app.models.schemas import GenerateReplyRequest
+
+    prompt = catalog_reply.build_user_prompt(GenerateReplyRequest.model_validate({**MAKEUP, "today": "2026-10-15"}))
+    assert "TODAY: 2026-10-15 (Thursday)" in prompt

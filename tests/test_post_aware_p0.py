@@ -82,7 +82,8 @@ OFFERING = {'id': 'o1', 'title': 'Bridal look', 'price_min': 18000, 'price_label
 
 def test_create_lead_confirms_and_keeps_ai_on(monkeypatch):
     monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {
-        'private_dm': "Your conversation is in the team's queue for review.", 'action': 'CREATE_LEAD'})
+        'private_dm': "Your conversation is in the team's queue for review.", 'action': 'CREATE_LEAD',
+        'collected_fields': {'city': 'Patna'}})
     reply = send('12 dec, Patna', offerings=[OFFERING], event_type='dm',
                  playbook={'goal': 'BOOKING', 'lead_fields': [{'key': 'city', 'label': 'City'}]})
     assert reply['action'] == 'CREATE_LEAD'

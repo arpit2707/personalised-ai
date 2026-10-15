@@ -11,8 +11,10 @@ from typing import Any, Dict, List, Optional
 
 from app.models.schemas import (BrandPersona, EmojiDensityEnum, GenerateReplyRequest, GenerateReplyResponse,
                                 LanguageModeEnum, OfferingContext, ToneEnum)
+from app.services.crisis import language_of
 from app.services.fact_guard import unsupported_facts
-from app.services.handoff_texts import handoff_text
+from app.services.field_check import checked_value, today_in_india
+from app.services.handoff_texts import handoff_text, lead_confirmation
 
 ACTIONS = {"SEND_LINK", "ASK_FIELD", "CREATE_LEAD", "HANDOFF", "ANSWER"}
 
@@ -302,6 +304,9 @@ def build_user_prompt(req: GenerateReplyRequest) -> str:
     if missing:
         parts.append("STILL NEEDED for a lead (ask for at most two, using these questions): "
                      + json.dumps([{"key": f.key, "ask": f.ask} for f in missing], ensure_ascii=False))
+    today = today_in_india(req.today)
+    parts.append(f"TODAY: {today.isoformat()} ({today.strftime('%A')}). Work out \"kal\", \"parso\", "
+                 "\"agle Sunday\" and dates without a year from this; never a date that has passed.")
     parts.append(f'CUSTOMER MESSAGE: "{req.message_text}"')
     parts.append(
         "Reply as JSON with keys:\n"
@@ -309,7 +314,8 @@ def build_user_prompt(req: GenerateReplyRequest) -> str:
         '"intent": "price_inquiry | availability | details | booking | general | complaint", '
         '"action": "SEND_LINK | ASK_FIELD | CREATE_LEAD | HANDOFF | ANSWER", '
         '"offering_ids": [catalog ids you talked about], '
-        '"collected_fields": {key: value} for STILL NEEDED keys the customer just gave you (dates as YYYY-MM-DD when a full date is given), '
+        '"collected_fields": {key: value} for STILL NEEDED keys the customer just gave you (dates as YYYY-MM-DD, '
+        'phone numbers as digits; only what they actually wrote, never a guess), '
         '"offering_type": "PRODUCTS" | "SERVICES" | null (what the customer wants, once clear), '
         '"reasoning": one short line}\n'
         "Use CREATE_LEAD when, after this message, nothing in STILL NEEDED is missing."
@@ -326,18 +332,13 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
         return fallback(req)
 
     ids = {o.id for o in offerings}
-    lead_keys = {f.key for f in (req.playbook.lead_fields if req.playbook else [])}
     action = str(raw.get("action") or "ANSWER").upper()
     if action not in ACTIONS:
         action = "ANSWER"
     public = _without_links(_untagged(raw.get("public_reply"))) if req.event_type == "comment" else None
     dm = str(raw.get("private_dm")).strip()
-    collected = {
-        str(k): str(v).strip()[:120]
-        for k, v in (raw.get("collected_fields") or {}).items()
-        if k in lead_keys and isinstance(v, (str, int, float)) and str(v).strip()
-        and str(v).strip().casefold() in req.message_text.casefold()
-    }
+    collected = _checked_fields(req, raw.get("collected_fields"))
+    dm, action = _lead_progress(req, collected, dm, action)
     offering_type = raw.get("offering_type") if raw.get("offering_type") in ("PRODUCTS", "SERVICES") else None
     response = GenerateReplyResponse(
         offering_type=offering_type,
@@ -409,6 +410,48 @@ def _without_links(text: Optional[str]) -> Optional[str]:
         return text
     cleaned = re.sub(r"\s{2,}", " ", _LINK.sub("", text)).strip(" :-")
     return cleaned or None
+
+
+def _checked_fields(req: GenerateReplyRequest, raw_fields: Any) -> Dict[str, str]:
+    """Lead details the customer really gave, each compared the way its kind needs."""
+    fields = {f.key: f for f in (req.playbook.lead_fields if req.playbook else [])}
+    if not isinstance(raw_fields, dict) or not fields:
+        return {}
+    today = today_in_india(req.today)
+    # A detail from an earlier message the last reply failed to keep counts too.
+    said = "\n".join([req.message_text, *(m.text for m in req.recent_messages if m.sender == "customer")])
+    out: Dict[str, str] = {}
+    for key, value in raw_fields.items():
+        field = fields.get(str(key))
+        if field is None or not isinstance(value, (str, int, float)) or isinstance(value, bool):
+            continue
+        checked = checked_value(field.key, field.label, str(value), said, today)
+        if checked:
+            out[field.key] = checked
+    return out
+
+
+def _lead_progress(req: GenerateReplyRequest, collected: Dict[str, str], dm: str, action: str):
+    """CREATE_LEAD only when every lead detail is known; the model's word is not enough.
+
+    Saying "details mil gaye" with the date still missing sends the seller half a
+    lead and leaves the customer waiting for a call about the wrong day.
+    """
+    playbook = req.playbook
+    if not playbook or not playbook.lead_fields or (playbook.goal or "ORDER").upper() == "ORDER":
+        return dm, action
+    known = (req.goal_state or {}).get("fields") or {}
+    missing = [f for f in playbook.lead_fields if not known.get(f.key) and not collected.get(f.key)]
+    if action == "CREATE_LEAD" and missing:
+        asks = [f.ask or f"{f.label}?" for f in missing[:2]]
+        if "?" not in dm:
+            thanks = "Thank you!" if language_of(req.message_text) == "english" else "Shukriya!"
+            dm = " ".join([thanks, *asks])
+        return dm, "ASK_FIELD"
+    if not missing and collected and action in ("ASK_FIELD", "ANSWER"):
+        # This message gave the last detail: confirm instead of asking again.
+        return (lead_confirmation(req.message_text) if "?" in dm else dm), "CREATE_LEAD"
+    return dm, action
 
 
 def allowed_link_set(req: GenerateReplyRequest) -> set:
