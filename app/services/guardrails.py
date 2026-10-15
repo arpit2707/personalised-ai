@@ -2,10 +2,16 @@
 import unicodedata
 from typing import Tuple
 
+# Patterns, not bare words: "fir" alone is Hinglish for "then" ("ok fir M bhej
+# do"), "loot offer" is a good deal and "fake hai kya?" asks if it is original.
+# Refunds are an order question (handoff_policy), not a complaint by themselves.
 NEGATIVE_KEYWORDS = [
-    "scam", "fake", "fraud", "cheater", "cheaters", "loot", "ghatiya", "bakwas",
-    "refund", "damaged", "chor", "complaint", "worst", "bekar", "stolen", "fir",
-    "police", "consumer court", "money back", "return nahi hua"
+    r"scam\w*", r"fraud\w*", r"cheaters?", r"ghatiya", r"bakwas", r"damaged?", r"chor", r"complaint",
+    r"worst", r"bekar", r"stolen", r"police", r"consumer\s+court", r"money\s+back", r"return\s+nahi\s+hua",
+    r"f\.?i\.?r\.?\s+(?:karu\w*|kar\s+dung\w*|darj|file|lodge)|(?:file|lodge|darj)\s+(?:an?\s+)?f\.?i\.?r",
+    r"loot\s+(?:liya|li|lete|rahe|macha\w*)|lut\s+gay\w*",
+    r"(?:you|aap|tum|ye|yeh|this)\s+(?:are|is|ho|hai|log)?\s*(?:a\s+)?fake\b(?!\s+(?:to|toh)?\s*nahi)(?!\s+hai\s+kya)"
+    r"|fake\s+(?:page|seller|product|maal|saman|samaan|account|id|bande?)\b|nakli\s+(?:maal|product|saman|samaan)",
 ]
 
 class GuardrailService:
@@ -19,7 +25,7 @@ class GuardrailService:
         
         # Check for aggressive or complaint keywords
         for keyword in NEGATIVE_KEYWORDS:
-            if re.search(r'\b' + re.escape(keyword) + r'\b', lower_text):
+            if re.search(r'\b(?:' + keyword + r')\b', lower_text):
                 deescalation = (
                     "Hi, we sincerely apologize for any inconvenience caused! "
                     "We take your concern very seriously. Our support team is directly reaching out to your DM "

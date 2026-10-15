@@ -23,6 +23,7 @@ def send(text='Hello', **extra):
     ('This product is damaged', 'complaint'), ('order place karwa do', 'purchase_assistance'),
     ('bulk order please', 'purchase_assistance'), ('best price please', 'purchase_assistance'),
     ('delivery boy ne harass kiya', 'complaint'), ('your staff misbehaved with me', 'complaint'),
+    ('mera order nahi aaya', 'order_support'), ('ye fake product bheja', 'complaint'), ('FIR karungi', 'complaint'),
 ])
 def test_handoff_and_pause(text, reason, monkeypatch):
     model = Mock(side_effect=AssertionError('Should not generate'))
@@ -108,6 +109,16 @@ def test_strict_safety_before_handoff_and_no_lead(monkeypatch):
 def test_selling_phrases_are_not_blocked(monkeypatch):
     reply = send('chemical-free shampoo price?').json()
     assert reply['intent'] != 'safety_refusal'
+
+
+@pytest.mark.parametrize('text', [
+    # Pre-sale questions, not order problems or complaints.
+    'Cancel karna pada to?', 'refund policy kya hai?', 'UPI payment chalega?', 'ok fir M size bhej do',
+    'original hai ya fake?', 'loot offer hai kya?',
+])
+def test_policy_and_everyday_questions_stay_with_ai(text):
+    from app.services.handoff_policy import handoff_reason
+    assert handoff_reason(text) is None
 
 
 @pytest.mark.parametrize('text', ['Ethnic wear hai?', 'Bombay delivery?', 'isme chemical hai?', 'ye lehenga bomb hai'])
