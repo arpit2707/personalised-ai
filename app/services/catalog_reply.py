@@ -43,11 +43,33 @@ GOAL_TEXT = {
 
 # ---------------------------------------------------------------- price guard
 
-_UNIT = {"k": 1e3, "thousand": 1e3, "lakh": 1e5, "lakhs": 1e5, "lac": 1e5, "lacs": 1e5, "l": 1e5,
-         "cr": 1e7, "crore": 1e7, "crores": 1e7}
-_CURRENCY_FIRST = re.compile(r"(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d+)?)\s*(k|thousand|lakhs?|lacs?|l|cr|crores?)?\b", re.I)
-_CURRENCY_LAST = re.compile(r"\b([\d,]+(?:\.\d+)?)\s*(k|thousand|lakhs?|lacs?|cr|crores?)?\s*(?:rs\.?|rupees?|/-|inr)(?![a-z])", re.I)
-_UNIT_ONLY = re.compile(r"\b(\d+(?:\.\d+)?)\s*(lakhs?|lacs?|crores?|cr)\b", re.I)
+_UNIT = {"k": 1e3, "thousand": 1e3, "hazar": 1e3, "hazaar": 1e3, "hajar": 1e3, "lakh": 1e5, "lakhs": 1e5,
+         "lac": 1e5, "lacs": 1e5, "l": 1e5, "cr": 1e7, "crore": 1e7, "crores": 1e7}
+_NUM = r"(\d[\d,]*(?:\.\d+)?)"
+_UNITS = r"(k|thousand|hazaa?r|hajar|lakhs?|lacs?|l|cr|crores?)"
+_RUPEE = r"(?:rs\.?|rupees?|rupaye|rupay|rupaiye|rupaiya|rupiya|rupiye|/-|inr)"
+_CURRENCY_FIRST = re.compile(r"(?:₹|\brs\.?|\binr)\s*" + _NUM + r"\s*" + _UNITS + r"?\b", re.I)
+_CURRENCY_LAST = re.compile(r"\b" + _NUM + r"\s*" + _UNITS + r"?\s*" + _RUPEE + r"(?![a-z])", re.I)
+_UNIT_ONLY = re.compile(r"\b(\d+(?:\.\d+)?)\s*(k|hazaa?r|hajar|lakhs?|lacs?|crores?|cr)\b", re.I)
+# A bare number is a price when a price word sits right next to it: "price 1499",
+# "sirf 999", "2500 ka hai", "1800 per night". Smaller numbers are sizes,
+# counts and days far more often than prices, so these need at least 100.
+_PRICE_WORD_BEFORE = re.compile(
+    r"\b(?:price|prices|rate|cost|costs|mrp|total|advance|charges?|fees?|keemat|kimat|daam|dam|sirf|only|just|"
+    r"starting|starts?|from|flat|deposit|token|booking\s+amount)\s*(?:is|hai|h|:|-|=|of|at|rs)?\s*" + _NUM + r"(?![\d.,]*\s*(?:%|percent))\b",
+    re.I)
+_PRICE_WORD_AFTER = re.compile(
+    r"\b" + _NUM + r"\s*(?:ka|ki|ke|me|mein|mai|only|sirf|tak|wala|wali|wale|se\s+start\w*|onwards|"
+    r"off|per\s+(?:night|day|piece|pc|kg|plate|person|head|month|hour|session|guest|room))\b",
+    re.I)
+_PERCENT = re.compile(r"\b(\d+(?:\.\d+)?)\s*(?:%|percent\b|pratishat\b|pratisat\b)", re.I)
+
+
+def _number(raw: str) -> Optional[float]:
+    try:
+        return float(raw.replace(",", ""))
+    except ValueError:
+        return None
 
 
 def extract_amounts(text: Optional[str]) -> List[float]:
@@ -55,16 +77,37 @@ def extract_amounts(text: Optional[str]) -> List[float]:
     if not text:
         return []
     out: List[float] = []
+
+    def add(n):
+        if n and n > 0 and n not in out:
+            out.append(n)
+
     for rx in (_CURRENCY_FIRST, _CURRENCY_LAST, _UNIT_ONLY):
         for raw, unit in rx.findall(text):
-            try:
-                n = float(raw.replace(",", ""))
-            except ValueError:
-                continue
-            if unit:
+            n = _number(raw)
+            if n is not None and unit:
                 n *= _UNIT.get(unit.lower(), 1)
-            if n > 0 and n not in out:
-                out.append(n)
+            add(n)
+    for rx in (_PRICE_WORD_BEFORE, _PRICE_WORD_AFTER):
+        for m in rx.finditer(text):
+            n = _number(m.group(1))
+            digits = re.sub(r"\D", "", m.group(1))
+            # Phone numbers and years are not prices ("2026 me", "98765 43210").
+            if n is None or n < 100 or len(digits) >= 10 or (2020 <= n <= 2040 and "." not in m.group(1)):
+                continue
+            add(n)
+    return out
+
+
+def extract_percents(text: Optional[str]) -> List[float]:
+    """Every percentage written in a message ("20% off", "50 percent advance")."""
+    if not text:
+        return []
+    out: List[float] = []
+    for raw in _PERCENT.findall(text):
+        n = _number(raw)
+        if n is not None and n not in out:
+            out.append(n)
     return out
 
 
@@ -77,13 +120,46 @@ def allowed_prices(offerings: List[OfferingContext]) -> List[float]:
         for v in o.variants:
             if v.price is not None:
                 allowed.add(float(v.price))
+        # "Combo of 2 at ₹2999" in the seller's own item text is a catalog price too.
+        for n in extract_amounts(_offering_text(o)):
+            allowed.add(n)
     return sorted(allowed)
+
+
+def _offering_text(o: OfferingContext) -> str:
+    return json.dumps([o.price_label, o.description, o.attributes, o.includes,
+                       [v.label for v in o.variants]], ensure_ascii=False, default=str)
+
+
+def _business_text(req: GenerateReplyRequest) -> str:
+    return json.dumps(req.business.model_dump(exclude_none=True), ensure_ascii=False) if req.business else ""
 
 
 def unknown_prices(reply: Optional[str], allowed: List[float], customer_text: str = "") -> List[float]:
     """Amounts in the reply that are neither a catalog price nor one the customer wrote ("₹5000 budget")."""
     allowed = list(allowed) + extract_amounts(customer_text)
     return [n for n in extract_amounts(reply) if not any(abs(a - n) < 0.005 for a in allowed)]
+
+
+def unknown_figures(req: GenerateReplyRequest, *replies: Optional[str]) -> List[str]:
+    """Prices and percentages in the reply that no catalog item, business detail or the customer gave.
+
+    Business policies and FAQs count ("delivery ₹99", "50% advance"), so a correct
+    answer from the page's own details is not blocked. The post caption may carry
+    the seller's offer percentage, but never a price: prices come from the catalog.
+    """
+    offerings = req.offerings or []
+    business = _business_text(req)
+    amounts = allowed_prices(offerings) + extract_amounts(business)
+    customer = req.message_text + "\n" + "\n".join(m.text for m in req.recent_messages if m.sender == "customer")
+    post = " ".join(t for t in ((req.post_context.caption, req.post_context.note) if req.post_context else ()) if t)
+    percents = (extract_percents(business) + extract_percents(customer) + extract_percents(post)
+                + [p for o in offerings for p in extract_percents(_offering_text(o))])
+    bad: List[str] = []
+    for reply in replies:
+        bad += [f"₹{n:g}" for n in unknown_prices(reply, amounts, customer)]
+        bad += [f"{n:g}%" for n in extract_percents(reply) if not any(abs(p - n) < 0.005 for p in percents)]
+    return bad
 
 
 # ---------------------------------------------------------------- prompts
@@ -272,9 +348,7 @@ def finalize(req: GenerateReplyRequest, raw: Optional[Dict[str, Any]]) -> Genera
         collected_fields=collected,
     )
 
-    allowed = allowed_prices(offerings)
-    bad = unknown_prices(response.public_reply, allowed, req.message_text) + unknown_prices(
-        response.private_dm, allowed, req.message_text)
+    bad = unknown_figures(req, response.public_reply, response.private_dm)
     if bad:
         safe = handoff_text("price_blocked", req.message_text)
         return GenerateReplyResponse(

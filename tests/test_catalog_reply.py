@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -251,3 +252,51 @@ def test_spotlight_link_is_allowed_other_links_are_not(monkeypatch):
     bad = post({**MAKEUP, "event_type": "dm", "sender_id": "u2", "spotlight": [SPOT]}, {
         "private_dm": "Ye dekhiye: https://instagram.com/p/other", "action": "ANSWER"}, monkeypatch)
     assert "other" not in (bad["private_dm"] or "")
+
+
+# ---------------------------------------------------------------- price guard gaps
+
+@pytest.mark.parametrize("text,amounts", [
+    ("Ye 2500 ka hai", [2500]), ("sirf 1499 me", [1499]), ("2.5k only", [2500]), ("2500 rupaye", [2500]),
+    ("price 1499", [1499]), ("1800 per night", [1800]), ("flat 500 off", [500]), ("2 hazar ka", [2000]),
+    # Not prices: sizes, days, years, phone numbers, counts, opening hours.
+    ("size 38 me available", []), ("Delivery 3-5 din me", []), ("Dec 2026 me", []),
+    ("98765 43210 pe call karo", []), ("only 3 left", []), ("24 hrs 7 days open", []),
+])
+def test_bare_prices_are_read(text, amounts):
+    assert catalog_reply.extract_amounts(text) == amounts
+
+
+@pytest.mark.parametrize("dm", [
+    "Bridal full look 25000 ka hai.", "Bridal look sirf 15000 me!", "Bridal look 20k se start.",
+    "Abhi 20% off mil raha hai.", "Flat 2000 off hai aaj.",
+])
+def test_made_up_price_or_discount_is_blocked(dm, monkeypatch):
+    data = post({**MAKEUP, "event_type": "dm"}, {"private_dm": dm, "action": "ANSWER"}, monkeypatch)
+    assert data["intent"] == "price_blocked"
+    assert data["action"] == "HANDOFF"
+    assert dm not in (data["private_dm"] or "")
+
+
+def test_business_and_customer_figures_are_allowed(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "advance kitna? mera budget 20000 hai",
+               "business": {**MAKEUP["business"], "policies": {"advance": "50% advance, travel charge ₹500 outside Patna"}}}
+    dm = "Bridal look ₹18,000 se start, aapke 20000 budget me ho jayega. 50% advance hota hai, Patna ke bahar ₹500 travel."
+    data = post(payload, {"private_dm": dm, "action": "ANSWER"}, monkeypatch)
+    assert data["intent"] != "price_blocked"
+    assert data["private_dm"] == dm
+
+
+def test_offer_percent_from_the_post_is_allowed_but_not_its_price(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "post_context": {"post_id": "ig_1", "caption": "Diwali offer 10% off, ₹15000 only"}}
+    ok = post(payload, {"private_dm": "Diwali pe 10% off hai, bridal ₹18,000 se start.", "action": "ANSWER"}, monkeypatch)
+    assert ok["intent"] != "price_blocked"
+    blocked = post({**payload, "sender_id": "u2"}, {"private_dm": "Bridal sirf ₹15000 only.", "action": "ANSWER"}, monkeypatch)
+    assert blocked["intent"] == "price_blocked"
+
+
+def test_amount_in_item_description_is_a_catalog_price(monkeypatch):
+    offering = {**MAKEUP["offerings"][0], "description": "Engagement add-on ₹6,500"}
+    data = post({**MAKEUP, "event_type": "dm", "offerings": [offering]},
+                {"private_dm": "Engagement add-on ₹6,500 ka hai.", "action": "ANSWER"}, monkeypatch)
+    assert data["intent"] != "price_blocked"
