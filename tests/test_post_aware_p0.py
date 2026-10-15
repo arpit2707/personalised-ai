@@ -60,8 +60,12 @@ def test_soft_line_is_not_sent_twice_in_a_row(monkeypatch):
     assert first['private_dm'] and first['conversation_status'] == 'ai'
     assert first['requires_human_attention'] is True
     second = send('aur COD?')
-    assert second['private_dm'] is None
+    # Not the same line again, and not silence: the customer always hears back.
+    assert second['private_dm'] and second['private_dm'] != first['private_dm']
+    assert 'team se confirm' in second['private_dm']
     assert second['conversation_status'] == 'ai'
+    third = send('aur exchange?')
+    assert third['private_dm'] == first['private_dm']
 
 
 def test_model_down_line_is_not_repeated(monkeypatch):

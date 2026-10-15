@@ -91,3 +91,27 @@ def test_public_comment_reply_carries_no_link(monkeypatch):
     assert data["action"] == "ANSWER"
     assert "http" not in data["public_reply"]
     assert data["public_reply"].startswith("DM check karo")
+
+
+TRIP = {**SHOP, "message_text": "price?", "business": {"industry": "TRAVEL"},
+        "offerings": [{"id": "k1", "title": "Bali 4N/5D Package", "price_label": "₹39,999 per person", "price_min": 39999,
+                       "attributes": {"duration": "4N/5D"}}]}
+
+
+@pytest.mark.parametrize("dm,ok", [
+    ("Bali 4N/5D Package ₹39,999 per person hai.", True),
+    ("Bali 5N/6D package ₹39,999 per person hai.", False),   # wrong length
+    ("4 nights ka trip hai.", True),
+    ("6 nights ka trip hai.", False),
+])
+def test_trip_length_must_be_the_catalog_one(dm, ok, monkeypatch):
+    monkeypatch.setattr(gemini_service, "generate", lambda *_: {"private_dm": dm, "action": "ANSWER", "offering_ids": ["k1"]})
+    data = client.post("/api/v1/generate-reply", json={**TRIP, "sender_id": f"trip-{dm[:20]}"}).json()
+    assert (data["action"] == "ANSWER") is ok, data
+
+
+def test_trip_length_the_customer_gave_may_be_repeated(monkeypatch):
+    monkeypatch.setattr(gemini_service, "generate", lambda *_: {
+        "private_dm": "3 raat ke liye bhi plan kar sakte hain, team confirm karegi.", "action": "ANSWER", "offering_ids": ["k1"]})
+    data = client.post("/api/v1/generate-reply", json={**TRIP, "sender_id": "trip-3", "message_text": "3 raat ka plan ho sakta hai?"}).json()
+    assert data["action"] == "ANSWER"

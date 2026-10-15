@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.core.config import settings
-from app.services.handoff_texts import PAUSING_REASONS, handoff_text, soft_texts
+from app.services.handoff_texts import PAUSING_REASONS, handoff_text, soft_again, soft_texts
 
 
 class ConversationConflict(Exception):
@@ -150,9 +150,11 @@ class ConversationStore:
                 if reason not in PAUSING_REASONS:
                     last = db.execute("SELECT text FROM messages WHERE conversation=? AND role='assistant' "
                                       "ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
-                    # The same "team will confirm" line twice in a row reads like a bot stuck in a loop.
+                    # The same "team will confirm" line twice in a row reads like a bot stuck
+                    # in a loop, and silence reads like a dead one: say it another way.
+                    # (While the model is down, one "message mil gaya" per outage is enough.)
                     if last and last['text'] in soft_texts(reason):
-                        reply = None
+                        reply = None if reason == 'generation_unavailable' else soft_again(source_text)
             if reply:
                 db.execute("INSERT INTO messages(conversation,role,text,created) VALUES(?,?,?,?)",
                            (cid, 'assistant', reply, now))

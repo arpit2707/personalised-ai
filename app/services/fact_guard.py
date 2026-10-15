@@ -22,6 +22,18 @@ _TIMED = re.compile(
 )
 _COUNTED = re.compile(r"\b(\d+(?:\s*(?:-|to|se)\s*\d+)?)\s*(?:pieces?|pcs|units?|left|bache|baaki)\b", re.I)
 
+# Trip and stay lengths: "5N/6D", "5 nights", "3 raat". A package's length is a
+# promise like its price, so it must be one the seller (or customer) wrote.
+_NIGHTS_DAYS = re.compile(r"\b(\d{1,2})\s*n(?:ights?)?\s*/\s*(\d{1,2})\s*d(?:ays?)?\b", re.I)
+_NIGHTS = re.compile(r"\b(\d{1,2})\s*(?:nights?|raat|raatein|raaton|raate)\b", re.I)
+
+
+def _stays(text: str):
+    pairs = {(int(n), int(d)) for n, d in _NIGHTS_DAYS.findall(text or "")}
+    nights = {n for n, _ in pairs} | {int(n) for n in _NIGHTS.findall(text or "")}
+    return pairs, nights
+
+
 # (what the reply says, what the seller's own text must mention for it to be true)
 _CLAIMS = [
     (r"\bcod\b|cash\s+on\s+delivery", r"\bcod\b|cash\s+on\s+delivery"),
@@ -73,6 +85,13 @@ def unsupported_facts(req: GenerateReplyRequest, offering_ids: List[str], *repli
             for m in rx.finditer(reply):
                 if any(n not in known for n in re.findall(r"\d+", m.group(1))):
                     bad.append(m.group(0))
+        known_pairs, known_nights = _stays(seller + "\n" + _customer_text(req))
+        for m in _NIGHTS_DAYS.finditer(reply):
+            if (int(m.group(1)), int(m.group(2))) not in known_pairs:
+                bad.append(m.group(0))
+        for m in _NIGHTS.finditer(reply):
+            if int(m.group(1)) not in known_nights:
+                bad.append(m.group(0))
         # A policy is true only when the seller wrote it; the customer asking
         # "COD hai?" is not a source.
         for said, needs in _CLAIMS:
