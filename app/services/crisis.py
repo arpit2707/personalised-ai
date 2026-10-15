@@ -65,7 +65,11 @@ _CRISIS = re.compile("|".join(_PATTERNS), re.IGNORECASE)
 
 _HINGLISH_MARKERS = re.compile(
     r"\b(?:hai|hain|nahi|nahin|kya|mujhe|mera|meri|main|mai|hoon|hu|kar|karna|chahta|chahti|"
-    r"zindagi|jeena|marna|jaana|kuch|koi|aap|tum|yaar|bhai|kaise|kyun|ab|abhi)\b",
+    r"zindagi|jeena|marna|jaana|kuch|koi|aap|tum|yaar|bhai|kaise|kyun|ab|abhi|"
+    r"bhi|doge|dogi|denge|milega|milegi|milenge|chahiye|kitna|kitne|kitni|kab|kahan|kidhar|kyu|kyon|"
+    r"batao|bataiye|bataye|karwa|karwana|karni|karo|kijiye|dijiye|bhej|bhejo|wala|wali|wale|ye|yeh|woh|"
+    r"aur|lekin|accha|achha|acha|theek|thik|haan|ji|sakte|sakta|sakti|hoga|hogi|raha|rahi|apna|apni|"
+    r"humein|hume|hamein|aapka|aapki|aapke|sirf|zyada|jyada|kam|wapas|matlab)\b",
     re.IGNORECASE,
 )
 

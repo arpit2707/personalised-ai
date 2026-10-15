@@ -8,9 +8,13 @@ message, and the same soft line is never sent twice in a row.
 from app.services.crisis import crisis_reply, language_of
 
 PAUSING_REASONS = {
-    "human_request", "complaint", "order_support", "purchase_assistance",
+    "human_request", "complaint", "order_support",
     "unresolved_query", "crisis",
 }
+# Flags for the seller that never stop the AI: a price objection, a discount
+# ask or "booking karwa do" is answered by the AI (holding the catalog price,
+# collecting the booking details) while the seller sees the chat is hot.
+FLAG_REASONS = {"purchase_assistance"}
 SOFT_REASONS = {"missing_information", "conflicting_information", "generation_unavailable", "price_blocked"}
 
 _TEXTS = {
@@ -44,7 +48,14 @@ _TEXTS = {
     ),
 }
 _TEXTS["conflicting_information"] = _TEXTS["missing_information"]
+# Sent instead when the last answer was already that soft line: the customer
+# never reads the same line twice in a row, and never gets silence either.
+_AGAIN = (
+    "Let me check this with our team and get back to you here. Anything else I can help with meanwhile?",
+    "Main ise team se confirm karke yahin batata hoon. Tab tak kuch aur puchna ho to batayein 🙂",
+)
 _TEXTS["price_blocked"] = _TEXTS["missing_information"]
+_TEXTS["fact_blocked"] = _TEXTS["missing_information"]
 
 LEAD_CONFIRMATION = (
     "Thank you! Our team will contact you to confirm the details.",
@@ -53,7 +64,11 @@ LEAD_CONFIRMATION = (
 
 
 def _pick(pair, customer_text: str) -> str:
-    return pair[0] if language_of(customer_text) == "english" else pair[1]
+    # "price", "details?" say nothing about language; Hinglish is the default
+    # for these pages. A real English sentence gets English.
+    words = len((customer_text or "").split())
+    english = language_of(customer_text) == "english" and words > 2
+    return pair[0] if english else pair[1]
 
 
 def handoff_text(reason: str, customer_text: str = "") -> str:
@@ -67,11 +82,15 @@ def soft_texts(reason: str) -> set:
     return set(_TEXTS.get(reason, _TEXTS["missing_information"]))
 
 
+def soft_again(customer_text: str = "") -> str:
+    return _pick(_AGAIN, customer_text)
+
+
 def lead_confirmation(customer_text: str = "") -> str:
     return _pick(LEAD_CONFIRMATION, customer_text)
 
 
 def is_handoff_line(text: str) -> bool:
     """True for any canned hand-off line, so a model echoing one is not a confirmation."""
-    lines = {t for pair in _TEXTS.values() for t in pair}
+    lines = {t for pair in (*_TEXTS.values(), _AGAIN) for t in pair}
     return (text or "").strip() in lines or "queue" in (text or "").casefold()

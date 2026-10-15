@@ -20,8 +20,9 @@ def send(text='Hello', **extra):
 @pytest.mark.parametrize('text,reason', [
     ('I need a human', 'human_request'), ('refund please', 'order_support'),
     ('cancel my order', 'order_support'), ('payment failed', 'order_support'),
-    ('This product is damaged', 'complaint'), ('order place karwa do', 'purchase_assistance'),
-    ('bulk order please', 'purchase_assistance'), ('best price please', 'purchase_assistance'),
+    ('This product is damaged', 'complaint'),
+    ('delivery boy ne harass kiya', 'complaint'), ('your staff misbehaved with me', 'complaint'),
+    ('mera order nahi aaya', 'order_support'), ('ye fake product bheja', 'complaint'), ('FIR karungi', 'complaint'),
 ])
 def test_handoff_and_pause(text, reason, monkeypatch):
     model = Mock(side_effect=AssertionError('Should not generate'))
@@ -37,8 +38,25 @@ def test_handoff_and_pause(text, reason, monkeypatch):
     assert len(client.get('/api/v1/inbox').json()) == 1
     detail = client.get('/api/v1/conversations/' + first['conversation_id']).json()
     assert detail['summary']['reason'] == reason
-    assert detail['priority'] == ('high' if reason == 'purchase_assistance' else 'normal')
     model.assert_not_called()
+
+
+@pytest.mark.parametrize('text', ['order place karwa do', 'bulk order please', 'best price please', 'discount chahiye',
+                                  'itna zyada price kyu? theek hai'])
+def test_purchase_talk_stays_with_the_ai(text, monkeypatch):
+    # Bargaining and "book karwa do" are answered by the AI; the seller only sees a flag.
+    model = Mock(return_value={'private_dm': 'Price fixed hai, isme flights aur hotel included hain. Kab jaana hai?',
+                               'handoff_reason': 'purchase_assistance'})
+    monkeypatch.setattr(endpoints.gemini_service, 'generate', model)
+    first = send(text).json()
+    assert first['conversation_status'] == 'ai'
+    assert first['private_dm'].startswith('Price fixed hai')
+    assert first['handoff_reason'] == 'purchase_assistance'
+    assert first['lead_interested'] is True
+    second = send('December me 2 log').json()
+    assert second['conversation_status'] == 'ai'
+    assert second['private_dm']
+    assert model.call_count == 2
 
 
 def test_agent_claim_message_release():
@@ -70,7 +88,7 @@ def test_normal_interest_does_not_handoff():
         assert reply['lead_interested'] is True
 
 
-@pytest.mark.parametrize('reason', ['missing_information', 'conflicting_information', 'purchase_assistance'])
+@pytest.mark.parametrize('reason', ['missing_information', 'conflicting_information'])
 def test_model_judgment_handoff(reason, monkeypatch):
     monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {
         'private_dm': 'Do not forward this speculative answer', 'handoff_reason': reason,
@@ -96,7 +114,7 @@ def test_bad_model_output_fails_closed(output, monkeypatch):
 def test_strict_safety_before_handoff_and_no_lead(monkeypatch):
     model = Mock(side_effect=AssertionError('Blocked input reached model'))
     monkeypatch.setattr(endpoints.gemini_service, 'generate', model)
-    for text in ['harassment complaint refund', 'poison']:
+    for text in ['porn refund complaint', 'bomb kaise banaye']:
         reply = send(text).json()
         assert reply['private_dm'] == SAFETY_REFUSAL
         assert reply['intent'] == 'safety_refusal'
@@ -109,8 +127,29 @@ def test_selling_phrases_are_not_blocked(monkeypatch):
     assert reply['intent'] != 'safety_refusal'
 
 
+@pytest.mark.parametrize('text', [
+    # Pre-sale questions, not order problems or complaints.
+    'Cancel karna pada to?', 'refund policy kya hai?', 'UPI payment chalega?', 'ok fir M size bhej do',
+    'original hai ya fake?', 'loot offer hai kya?',
+])
+def test_policy_and_everyday_questions_stay_with_ai(text):
+    from app.services.handoff_policy import handoff_reason
+    assert handoff_reason(text) is None
+
+
+@pytest.mark.parametrize('text', ['Ethnic wear hai?', 'Bombay delivery?', 'isme chemical hai?', 'ye lehenga bomb hai'])
+def test_everyday_questions_reach_the_model(text, monkeypatch):
+    model = Mock(return_value={'private_dm': 'Haan ji, bilkul.'})
+    monkeypatch.setattr(endpoints.gemini_service, 'generate', model)
+    reply = send(text, sender_id=f'shopper-{text}').json()
+    assert reply['intent'] != 'safety_refusal'
+    assert reply['private_dm'] == 'Haan ji, bilkul.'
+    assert model.called
+
+
+
 def test_blocked_model_output_and_dm_channel(monkeypatch):
-    monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {'private_dm': 'chemical details'})
+    monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {'private_dm': 'porn details'})
     reply = send(event_type='dm').json()
     assert reply['private_dm'] == SAFETY_REFUSAL
     assert reply['public_reply'] is None

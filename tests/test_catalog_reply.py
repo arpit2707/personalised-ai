@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -251,3 +252,204 @@ def test_spotlight_link_is_allowed_other_links_are_not(monkeypatch):
     bad = post({**MAKEUP, "event_type": "dm", "sender_id": "u2", "spotlight": [SPOT]}, {
         "private_dm": "Ye dekhiye: https://instagram.com/p/other", "action": "ANSWER"}, monkeypatch)
     assert "other" not in (bad["private_dm"] or "")
+
+
+# ---------------------------------------------------------------- price guard gaps
+
+@pytest.mark.parametrize("text,amounts", [
+    ("Ye 2500 ka hai", [2500]), ("sirf 1499 me", [1499]), ("2.5k only", [2500]), ("2500 rupaye", [2500]),
+    ("price 1499", [1499]), ("1800 per night", [1800]), ("flat 500 off", [500]), ("2 hazar ka", [2000]),
+    # Not prices: sizes, days, years, phone numbers, counts, opening hours.
+    ("size 38 me available", []), ("Delivery 3-5 din me", []), ("Dec 2026 me", []),
+    ("98765 43210 pe call karo", []), ("only 3 left", []), ("24 hrs 7 days open", []),
+])
+def test_bare_prices_are_read(text, amounts):
+    assert catalog_reply.extract_amounts(text) == amounts
+
+
+@pytest.mark.parametrize("dm", [
+    "Bridal full look 25000 ka hai.", "Bridal look sirf 15000 me!", "Bridal look 20k se start.",
+    "Abhi 20% off mil raha hai.", "Flat 2000 off hai aaj.",
+])
+def test_made_up_price_or_discount_is_blocked(dm, monkeypatch):
+    data = post({**MAKEUP, "event_type": "dm"}, {"private_dm": dm, "action": "ANSWER"}, monkeypatch)
+    assert data["intent"] == "price_blocked"
+    assert data["action"] == "HANDOFF"
+    assert dm not in (data["private_dm"] or "")
+
+
+def test_business_and_customer_figures_are_allowed(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "advance kitna? mera budget 20000 hai",
+               "business": {**MAKEUP["business"], "policies": {"advance": "50% advance, travel charge ₹500 outside Patna"}}}
+    dm = "Bridal look ₹18,000 se start, aapke 20000 budget me ho jayega. 50% advance hota hai, Patna ke bahar ₹500 travel."
+    data = post(payload, {"private_dm": dm, "action": "ANSWER"}, monkeypatch)
+    assert data["intent"] != "price_blocked"
+    assert data["private_dm"] == dm
+
+
+def test_offer_percent_from_the_post_is_allowed_but_not_its_price(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "post_context": {"post_id": "ig_1", "caption": "Diwali offer 10% off, ₹15000 only"}}
+    ok = post(payload, {"private_dm": "Diwali pe 10% off hai, bridal ₹18,000 se start.", "action": "ANSWER"}, monkeypatch)
+    assert ok["intent"] != "price_blocked"
+    blocked = post({**payload, "sender_id": "u2"}, {"private_dm": "Bridal sirf ₹15000 only.", "action": "ANSWER"}, monkeypatch)
+    assert blocked["intent"] == "price_blocked"
+
+
+def test_amount_in_item_description_is_a_catalog_price(monkeypatch):
+    offering = {**MAKEUP["offerings"][0], "description": "Engagement add-on ₹6,500"}
+    data = post({**MAKEUP, "event_type": "dm", "offerings": [offering]},
+                {"private_dm": "Engagement add-on ₹6,500 ka hai.", "action": "ANSWER"}, monkeypatch)
+    assert data["intent"] != "price_blocked"
+
+
+# ---------------------------------------------------------------- lead details
+
+from datetime import date
+
+from app.services.field_check import checked_value, dates_in
+
+TODAY = date(2026, 10, 15)  # a Thursday
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("15 Nov ko chahiye", date(2026, 11, 15)), ("15/11", date(2026, 11, 15)), ("Dec 5", date(2026, 12, 5)),
+    ("5th December 2027", date(2027, 12, 5)), ("kal", date(2026, 10, 16)), ("parso", date(2026, 10, 17)),
+    ("agle Sunday", date(2026, 10, 25)), ("Sunday ko", date(2026, 10, 18)), ("10 Jan", date(2027, 1, 10)),
+    ("2026-11-20", date(2026, 11, 20)),
+])
+def test_dates_customers_write(text, expected):
+    assert expected in dates_in(text, TODAY)
+
+
+@pytest.mark.parametrize("key,label,value,message,stored", [
+    ("date", "Event date", "2026-11-15", "15 Nov ko function hai", "2026-11-15"),
+    ("date", "Event date", "2026-11-16", "15 Nov ko function hai", None),      # not what they said
+    ("date", "Event date", "2026-10-16", "kal chahiye", "2026-10-16"),
+    ("date", "Event date", "15 Nov", "15 Nov ko", "2026-11-15"),
+    ("date", "Travel month", "2026-12", "December me jaana hai", "2026-12"),
+    ("phone", "Phone", "9876543210", "number 98765 43210 hai", "9876543210"),
+    ("phone", "Phone", "+919876543210", "9876543210", "+919876543210"),
+    ("phone", "Phone", "9876543211", "number 98765 43210 hai", None),
+    ("city", "City", "Mumbai", "Bombay me hu", "Mumbai"),
+    ("city", "City", "Patna", "patna se", "Patna"),
+    ("city", "City", "Delhi", "Patna se", None),
+    ("people", "People", "50 people", "50 log aayenge", "50 people"),
+    ("budget", "Budget", "5000000", "budget 50 lakh hai", "5000000"),
+    ("config", "Configuration", "2 BHK", "2bhk chahiye", "2 BHK"),
+])
+def test_lead_details_are_checked_by_kind(key, label, value, message, stored):
+    assert checked_value(key, label, value, message, TODAY) == stored
+
+
+def test_iso_date_for_a_written_date_is_kept(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "15 Nov ko shaadi hai", "today": "2026-10-15"}
+    data = post(payload, {"private_dm": "Done! Team confirm karegi.", "action": "CREATE_LEAD",
+                          "collected_fields": {"date": "2026-11-15"}}, monkeypatch)
+    assert data["collected_fields"] == {"date": "2026-11-15"}
+    assert data["action"] == "CREATE_LEAD"
+
+
+def test_lead_is_not_created_while_a_detail_is_missing(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "Shaadi wali booking karni hai", "goal_state": {"fields": {}}}
+    data = post(payload, {"private_dm": "Details mil gaye, team contact karegi.", "action": "CREATE_LEAD",
+                          "collected_fields": {"date": "2026-11-15"}}, monkeypatch)
+    assert data["action"] == "ASK_FIELD"
+    assert data["collected_fields"] == {}
+    assert "mil gaye" not in data["private_dm"]
+    assert "Aapka function kis date ko hai?" in data["private_dm"]
+
+
+def test_last_detail_creates_the_lead(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "15 Nov", "today": "2026-10-15"}
+    data = post(payload, {"private_dm": "Function kis date ko hai?", "action": "ASK_FIELD",
+                          "collected_fields": {"date": "2026-11-15"}}, monkeypatch)
+    assert data["action"] == "CREATE_LEAD"
+    assert "?" not in data["private_dm"]
+
+
+def test_prompt_has_today():
+    from app.models.schemas import GenerateReplyRequest
+
+    prompt = catalog_reply.build_user_prompt(GenerateReplyRequest.model_validate({**MAKEUP, "today": "2026-10-15"}))
+    assert "TODAY: 2026-10-15 (Thursday)" in prompt
+
+
+# ---------------------------------------------------------------- comments, posts, older path
+
+def test_public_reply_drops_price_nobody_asked_for_and_stays_short(monkeypatch):
+    payload = {**MAKEUP, "message_text": "Wow so pretty 😍", "sender_id": "pub-1"}
+    long_public = ("Thank you so much! Bridal full look ₹18,000 se start hota hai. " + "Bahut pyaar mila is look ko " * 6).strip()
+    data = post(payload, {"public_reply": long_public, "private_dm": "Bridal full look ₹18,000 se start.",
+                          "action": "ANSWER", "offering_ids": ["off_bridal"]}, monkeypatch)
+    assert "18,000" not in data["public_reply"]
+    assert len(data["public_reply"].split()) <= 25
+    assert "18,000" in data["private_dm"]
+
+
+def test_public_reply_keeps_price_when_asked(monkeypatch):
+    payload = {**MAKEUP, "message_text": "price?", "sender_id": "pub-2"}
+    data = post(payload, {"public_reply": "Bridal full look ₹18,000 se start!", "private_dm": "₹18,000 se start.",
+                          "action": "ANSWER"}, monkeypatch)
+    assert data["public_reply"] == "Bridal full look ₹18,000 se start!"
+
+
+def test_price_for_an_item_the_post_does_not_show_is_held(monkeypatch):
+    # No item is linked to this post; search found a similar one.
+    offering = {**MAKEUP["offerings"][0], "linked_to_post": False, "match": "search"}
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "price?", "sender_id": "post-1", "offerings": [offering],
+               "post_context": {"post_id": "ig_9", "caption": "Party ready ✨"}}
+    data = post(payload, {"private_dm": "Bridal full look ₹18,000 se start.", "action": "ANSWER",
+                          "offering_ids": ["off_bridal"]}, monkeypatch)
+    assert data["action"] == "HANDOFF"
+    assert "18,000" not in data["private_dm"]
+
+
+def test_price_for_an_item_the_customer_named_is_sent(monkeypatch):
+    offering = {**MAKEUP["offerings"][0], "linked_to_post": False, "match": "search"}
+    payload = {**MAKEUP, "event_type": "dm", "message_text": "bridal look ka price?", "sender_id": "post-2",
+               "offerings": [offering], "post_context": {"post_id": "ig_9", "caption": "Party ready ✨"}}
+    data = post(payload, {"private_dm": "Bridal full look ₹18,000 se start.", "action": "ANSWER",
+                          "offering_ids": ["off_bridal"]}, monkeypatch)
+    assert data["action"] == "ANSWER"
+
+
+def test_older_one_product_path_is_guarded_too(monkeypatch):
+    from app.api.v1 import endpoints
+    from app.models.schemas import ProductInfo
+
+    endpoints.catalog_store.upsert_product("test_brand", ProductInfo(
+        sku="legacy-1", title="Cotton Shirt", price=799, checkout_url="https://shop.example/shirt"))
+    monkeypatch.setattr(gemini_service, "generate", lambda *_: {"private_dm": "Cotton Shirt sirf 599 me!",
+                                                                "public_reply": None})
+    res = client.post("/api/v1/generate-reply", json={
+        "brand_id": "test_brand", "sender_id": "legacy-u", "message_text": "shirt price?", "event_type": "dm",
+        "post_context": {"post_id": "p", "tagged_product_sku": "legacy-1"}}).json()
+    assert res["intent"] == "price_blocked"
+    assert "599" not in (res["private_dm"] or "")
+
+
+def test_totals_from_customer_quantities_and_policy_percent_are_allowed(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "sender_id": "totals-1", "message_text": "3 log ka bridal look chahiye",
+               "business": {**MAKEUP["business"], "policies": {"advance": "30% advance to block the date"}}}
+    dm = "3 looks ka total ₹54,000 se start hoga, 30% advance yaani ₹5,400 per look."
+    data = post(payload, {"private_dm": dm, "action": "ANSWER"}, monkeypatch)
+    assert data["intent"] != "price_blocked", data
+    made_up = post({**payload, "sender_id": "totals-2"}, {"private_dm": "Total ₹60,000 hoga.", "action": "ANSWER"},
+                   monkeypatch)
+    assert made_up["intent"] == "price_blocked"
+
+
+def test_price_objection_is_answered_not_handed_over(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "sender_id": "objection-1", "message_text": "itna zyada price kyu? theek hai"}
+    dm = "Bridal full look ₹18,000 se start hai kyunki isme face makeup, hair styling aur draping teeno hain. Function kis date ko hai?"
+    data = post(payload, {"private_dm": dm, "action": "HANDOFF", "handoff_reason": "purchase_assistance"}, monkeypatch)
+    assert data["private_dm"] == dm
+    assert data["action"] == "ANSWER"
+    assert data["conversation_status"] == "ai"
+    assert data["handoff_reason"] == "purchase_assistance"
+    # A made-up discount is still stopped, flag or not.
+    blocked = post({**payload, "sender_id": "objection-2"},
+                   {"private_dm": "Aapke liye ₹15,000 kar dete hain", "action": "ANSWER",
+                    "handoff_reason": "purchase_assistance"}, monkeypatch)
+    assert blocked["intent"] == "price_blocked"
+    assert "15,000" not in blocked["private_dm"]

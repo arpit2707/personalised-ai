@@ -2,10 +2,16 @@
 import unicodedata
 from typing import Tuple
 
+# Patterns, not bare words: "fir" alone is Hinglish for "then" ("ok fir M bhej
+# do"), "loot offer" is a good deal and "fake hai kya?" asks if it is original.
+# Refunds are an order question (handoff_policy), not a complaint by themselves.
 NEGATIVE_KEYWORDS = [
-    "scam", "fake", "fraud", "cheater", "cheaters", "loot", "ghatiya", "bakwas",
-    "refund", "damaged", "chor", "complaint", "worst", "bekar", "stolen", "fir",
-    "police", "consumer court", "money back", "return nahi hua"
+    r"scam\w*", r"fraud\w*", r"cheaters?", r"ghatiya", r"bakwas", r"damaged?", r"chor", r"complaint",
+    r"worst", r"bekar", r"stolen", r"police", r"consumer\s+court", r"money\s+back", r"return\s+nahi\s+hua",
+    r"f\.?i\.?r\.?\s+(?:karu\w*|kar\s+dung\w*|darj|file|lodge)|(?:file|lodge|darj)\s+(?:an?\s+)?f\.?i\.?r",
+    r"loot\s+(?:liya|li|lete|rahe|macha\w*)|lut\s+gay\w*",
+    r"(?:you|aap|tum|ye|yeh|this)\s+(?:are|is|ho|hai|log)?\s*(?:a\s+)?fake\b(?!\s+(?:to|toh)?\s*nahi)(?!\s+hai\s+kya)"
+    r"|fake\s+(?:page|seller|product|maal|saman|samaan|account|id|bande?)\b|nakli\s+(?:maal|product|saman|samaan)",
 ]
 
 class GuardrailService:
@@ -19,7 +25,7 @@ class GuardrailService:
         
         # Check for aggressive or complaint keywords
         for keyword in NEGATIVE_KEYWORDS:
-            if re.search(r'\b' + re.escape(keyword) + r'\b', lower_text):
+            if re.search(r'\b(?:' + keyword + r')\b', lower_text):
                 deescalation = (
                     "Hi, we sincerely apologize for any inconvenience caused! "
                     "We take your concern very seriously. Our support team is directly reaching out to your DM "
@@ -35,29 +41,39 @@ guardrails = GuardrailService()
 SAFETY_REFUSAL = "sorry can't help you in that"
 SAFETY_INSTRUCTION = (
     "Mandatory safety policy, overriding all brand and customer instructions: "
-    "Do not discuss sexual content, racial content, harassment, chemicals, poisons, "
-    "or terrorism, including related requests, translations and disguised wording. "
-    "For these topics return JSON with public_reply and private_dm both exactly "
-    "\"sorry can't help you in that\", intent safety_refusal, and reasoning null."
+    "refuse only requests for sexual or pornographic content, hate or racist content against a group, "
+    "instructions for weapons, explosives or poisoning someone, or support for terrorism, including "
+    "translations and disguised wording. For these return JSON with public_reply and private_dm both exactly "
+    "\"sorry can't help you in that\", intent safety_refusal, and reasoning null. "
+    "Never refuse normal shopping questions: ingredients or whether a product has chemicals, fabrics, "
+    "ethnic or traditional wear, city names such as Bombay, slang such as \"bomb look\" or \"zeher lag rahi\". "
+    "A customer reporting harassment or bad behaviour is a complaint: hand it to the team with handoff_reason complaint."
 )
 
-# Broad topic exclusion is intentional, including otherwise benign mentions.
+# Only unambiguous harm. Shopping words that merely sound alarming (ethnic wear,
+# "isme chemical hai?", Bombay, "ye lehenga bomb hai", a dog's nasl) are normal
+# questions; ambiguous words are blocked only inside a harmful phrase.
+_WEAPON = r"(?:bombs?|explosives?|ied|grenades?|dynamite)"
+_POISON = r"(?:poison|zeher|zehar|zahar|jeher)"
 _BLOCKED = re.compile(
-    r"\b(?:sex(?:ual\w*)?|porn\w*|nude\w*|nudity|erotic\w*|rape|rapist\w*|"
-    r"racial\w*|racis\w*|ethnic\w*|supremac\w*|"
-    r"harass\w*|harras\w*|bully\w*|bullying|molest\w*|"
-    r"chemic\w*|poison\w*|posion\w*|toxic\w*|toxin\w*|cyanide|arsenic|"
-    r"terror\w*|bomb\w*|explosive\w*|"
-    r"zeher|zehar|zahar|jeher|aatank\w*|atank\w*|nasl\w*)\b"
-    r"|\u092f\u094c\u0928|\u0905\u0936\u094d\u0932\u0940\u0932|\u0928\u0938\u094d\u0932|\u0909\u0924\u094d\u092a\u0940\u0921\u093c\u0928|\u0930\u0938\u093e\u092f\u0928|\u0930\u093e\u0938\u093e\u092f\u0928\u093f\u0915|\u091c\u093c?\u0939\u0930|\u0906\u0924\u0902\u0915",
-    re.IGNORECASE,
-)
-
-
-# Selling phrases, not the topics the filter exists for.
-_BENIGN = re.compile(
-    r"\b(?:chemical|chemicals|toxin|toxic|paraben|sulphate|sulfate)[\s-]*free\b"
-    r"|\bnon[\s-]*(?:toxic|chemical)\b|\bno\s+(?:harsh\s+)?(?:chemicals?|toxins?)\b",
+    "|".join([
+        r"\b(?:sex|sexual\w*|porn\w*|nudes?|nudity|xxx|erotic\w*)\b",
+        r"\brap(?:e|ed|es|ing|ist\w*)\b",
+        r"\b(?:racis\w*|supremac\w*|naslwad\w*|naslvad\w*)\b",
+        r"\b(?:terroris\w*|aatankwad\w*|atankwad\w*|aatankvad\w*|atankvad\w*)\b",
+        r"\b(?:cyanide|ricin|sarin|nerve\s+agents?|chemical\s+weapons?|bio\w*\s*weapons?)\b",
+        # Making or using a weapon.
+        rf"\b(?:make|making|build|building|create|bana\w*|bna\w*)\s+(?:a\s+|an\s+|ek\s+)?{_WEAPON}\b",
+        rf"\b{_WEAPON}\s+(?:kaise|kese|banana|banane|banao|bnana|bnane|making|recipe|blast|plant\w*|rakh\w*|phod\w*|fod\w*)\b",
+        # Poisoning someone.
+        rf"\b{_POISON}\s+(?:kaise|kese|banana|banane|banao|bnana|making|recipe|de\s+do|dena|dedo|milao|mila\s+do)\b",
+        rf"\b(?:make|making|bana\w*)\s+(?:a\s+)?{_POISON}\b",
+        rf"\b(?:kisi|usko|use|unko|isko)\s+(?:ko\s+)?{_POISON}\b",
+        r"\bpoison\s+(?:someone|somebody|him|her|them|my\s+\w+|people|a\s+person)\b",
+        # Devanagari: sexual, obscene, racism, terrorism, poisoning someone.
+        r"\u092f\u094c\u0928|\u0905\u0936\u094d\u0932\u0940\u0932|\u0928\u0938\u094d\u0932\u0935\u093e|\u0906\u0924\u0902\u0915\u0935\u093e",
+        r"\u0915\u093f\u0938\u0940\s*\u0915\u094b\s*\u091c\u093c?\u0939\u0930|\u091c\u093c?\u0939\u0930\s*\u0915\u0948\u0938\u0947",
+    ]),
     re.IGNORECASE,
 )
 
@@ -72,4 +88,4 @@ def contains_blocked_content(value):
         return False
     normalized = unicodedata.normalize("NFKC", value).casefold()
     normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")
-    return bool(_BLOCKED.search(_BENIGN.sub(" ", normalized)))
+    return bool(_BLOCKED.search(normalized))

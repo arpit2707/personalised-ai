@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.core.config import settings
-from app.services.handoff_texts import PAUSING_REASONS, handoff_text, soft_texts
+from app.services.handoff_texts import PAUSING_REASONS, handoff_text, soft_again, soft_texts
 
 
 class ConversationConflict(Exception):
@@ -117,7 +117,7 @@ class ConversationStore:
             return {'history': list(reversed(history)), 'preferences': {p['key']: p['value'] for p in prefs}}
 
     def finish(self, brand, snapshot, *, reply=None, reason=None, product=None,
-               interested=False, unresolved=False, preferences=(), source_text=''):
+               interested=False, unresolved=False, preferences=(), source_text='', flag=None):
         now = self.clock()
         cid = snapshot['id']
         with self.db() as db:
@@ -127,13 +127,15 @@ class ConversationStore:
             count = row['unresolved'] + 1 if unresolved else 0
             if count >= 2 and reason is None:
                 reason = 'unresolved_query'
-            # Soft reasons ("the team will confirm this") keep the AI answering.
+            # Soft reasons ("the team will confirm this") keep the AI answering,
+            # and a flag (a hot purchase chat) only marks it for the seller.
             status = 'pending' if reason in PAUSING_REASONS else 'ai'
-            priority = 'high' if reason == 'purchase_assistance' else 'normal'
+            stored = reason or flag
+            priority = 'high' if stored == 'purchase_assistance' else 'normal'
             db.execute('''UPDATE conversations SET status=?, reason=?, priority=?, unresolved=?,
                        product=COALESCE(?,product), product_at=CASE WHEN ? IS NULL THEN product_at ELSE ? END,
                        lead_at=CASE WHEN ? THEN ? ELSE lead_at END, updated=?, version=version+1 WHERE id=?''',
-                       (status, reason, priority, count, product, product, now, interested, now, now, cid))
+                       (status, stored, priority, count, product, product, now, interested, now, now, cid))
             for pref in preferences:
                 # Only explicitly stated, allowlisted preferences; no arbitrary memory instructions.
                 if pref['evidence'].casefold() not in source_text.casefold():
@@ -148,9 +150,11 @@ class ConversationStore:
                 if reason not in PAUSING_REASONS:
                     last = db.execute("SELECT text FROM messages WHERE conversation=? AND role='assistant' "
                                       "ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
-                    # The same "team will confirm" line twice in a row reads like a bot stuck in a loop.
+                    # The same "team will confirm" line twice in a row reads like a bot stuck
+                    # in a loop, and silence reads like a dead one: say it another way.
+                    # (While the model is down, one "message mil gaya" per outage is enough.)
                     if last and last['text'] in soft_texts(reason):
-                        reply = None
+                        reply = None if reason == 'generation_unavailable' else soft_again(source_text)
             if reply:
                 db.execute("INSERT INTO messages(conversation,role,text,created) VALUES(?,?,?,?)",
                            (cid, 'assistant', reply, now))

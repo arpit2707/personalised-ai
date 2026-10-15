@@ -153,6 +153,9 @@ class GenerateReplyRequest(BaseModel):
     # claimed. Other callers keep the queue until an agent releases it.
     resume_if_pending: bool = False
     llm: Optional[LLMConfig] = None
+    # The seller's local date (YYYY-MM-DD), so "kal" and "15 Nov" mean the right
+    # day. India's date when missing.
+    today: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 class GenerateReplyResponse(BaseModel):
     public_reply: Optional[str] = None
