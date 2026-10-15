@@ -437,3 +437,19 @@ def test_totals_from_customer_quantities_and_policy_percent_are_allowed(monkeypa
     made_up = post({**payload, "sender_id": "totals-2"}, {"private_dm": "Total ₹60,000 hoga.", "action": "ANSWER"},
                    monkeypatch)
     assert made_up["intent"] == "price_blocked"
+
+
+def test_price_objection_is_answered_not_handed_over(monkeypatch):
+    payload = {**MAKEUP, "event_type": "dm", "sender_id": "objection-1", "message_text": "itna zyada price kyu? theek hai"}
+    dm = "Bridal full look ₹18,000 se start hai kyunki isme face makeup, hair styling aur draping teeno hain. Function kis date ko hai?"
+    data = post(payload, {"private_dm": dm, "action": "HANDOFF", "handoff_reason": "purchase_assistance"}, monkeypatch)
+    assert data["private_dm"] == dm
+    assert data["action"] == "ANSWER"
+    assert data["conversation_status"] == "ai"
+    assert data["handoff_reason"] == "purchase_assistance"
+    # A made-up discount is still stopped, flag or not.
+    blocked = post({**payload, "sender_id": "objection-2"},
+                   {"private_dm": "Aapke liye ₹15,000 kar dete hain", "action": "ANSWER",
+                    "handoff_reason": "purchase_assistance"}, monkeypatch)
+    assert blocked["intent"] == "price_blocked"
+    assert "15,000" not in blocked["private_dm"]

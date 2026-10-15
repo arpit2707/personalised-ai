@@ -200,8 +200,12 @@ def build_system_prompt(persona: BrandPersona, req: GenerateReplyRequest) -> str
         "- Never claim a booking, order or payment is done; say the team will confirm.",
         "- Never agree to a price or discount the customer proposes; a budget they mention only helps pick options.",
         "- Never say a DM was sent or a person has joined; the system says that when it is true.",
-        "- Complaints, refunds, order problems or a request for a person: action HANDOFF with handoff_reason "
-        "complaint, order_support or human_request. Bulk orders and negotiation: purchase_assistance.",
+        "- Complaints, refunds, problems with a placed order, or the customer asking for a person: action HANDOFF "
+        "with handoff_reason complaint, order_support or human_request. Nothing else is a reason to hand over.",
+        "- Price objections (\"itna mehenga kyu?\", \"thoda kam karo\"), discount asks, bargaining, bulk enquiries and "
+        "\"booking/order karwa do\": answer them yourself. Keep the catalog price, say what it includes, offer a cheaper "
+        "catalog option if there is one, and collect the STILL NEEDED details. Set handoff_reason purchase_assistance: "
+        "it only tells the seller this chat is hot, you keep chatting. Never use action HANDOFF for these.",
         "- A fact the customer needs that nobody gave you: handoff_reason missing_information (the team will confirm it).",
         "- previous_answer_unresolved only when the customer says your last answer did not help; "
         "buying_interest for normal interest in buying.",

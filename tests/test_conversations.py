@@ -20,8 +20,7 @@ def send(text='Hello', **extra):
 @pytest.mark.parametrize('text,reason', [
     ('I need a human', 'human_request'), ('refund please', 'order_support'),
     ('cancel my order', 'order_support'), ('payment failed', 'order_support'),
-    ('This product is damaged', 'complaint'), ('order place karwa do', 'purchase_assistance'),
-    ('bulk order please', 'purchase_assistance'), ('best price please', 'purchase_assistance'),
+    ('This product is damaged', 'complaint'),
     ('delivery boy ne harass kiya', 'complaint'), ('your staff misbehaved with me', 'complaint'),
     ('mera order nahi aaya', 'order_support'), ('ye fake product bheja', 'complaint'), ('FIR karungi', 'complaint'),
 ])
@@ -39,8 +38,25 @@ def test_handoff_and_pause(text, reason, monkeypatch):
     assert len(client.get('/api/v1/inbox').json()) == 1
     detail = client.get('/api/v1/conversations/' + first['conversation_id']).json()
     assert detail['summary']['reason'] == reason
-    assert detail['priority'] == ('high' if reason == 'purchase_assistance' else 'normal')
     model.assert_not_called()
+
+
+@pytest.mark.parametrize('text', ['order place karwa do', 'bulk order please', 'best price please', 'discount chahiye',
+                                  'itna zyada price kyu? theek hai'])
+def test_purchase_talk_stays_with_the_ai(text, monkeypatch):
+    # Bargaining and "book karwa do" are answered by the AI; the seller only sees a flag.
+    model = Mock(return_value={'private_dm': 'Price fixed hai, isme flights aur hotel included hain. Kab jaana hai?',
+                               'handoff_reason': 'purchase_assistance'})
+    monkeypatch.setattr(endpoints.gemini_service, 'generate', model)
+    first = send(text).json()
+    assert first['conversation_status'] == 'ai'
+    assert first['private_dm'].startswith('Price fixed hai')
+    assert first['handoff_reason'] == 'purchase_assistance'
+    assert first['lead_interested'] is True
+    second = send('December me 2 log').json()
+    assert second['conversation_status'] == 'ai'
+    assert second['private_dm']
+    assert model.call_count == 2
 
 
 def test_agent_claim_message_release():
@@ -72,7 +88,7 @@ def test_normal_interest_does_not_handoff():
         assert reply['lead_interested'] is True
 
 
-@pytest.mark.parametrize('reason', ['missing_information', 'conflicting_information', 'purchase_assistance'])
+@pytest.mark.parametrize('reason', ['missing_information', 'conflicting_information'])
 def test_model_judgment_handoff(reason, monkeypatch):
     monkeypatch.setattr(endpoints.gemini_service, 'generate', lambda *_: {
         'private_dm': 'Do not forward this speculative answer', 'handoff_reason': reason,

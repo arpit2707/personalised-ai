@@ -8,9 +8,13 @@ message, and the same soft line is never sent twice in a row.
 from app.services.crisis import crisis_reply, language_of
 
 PAUSING_REASONS = {
-    "human_request", "complaint", "order_support", "purchase_assistance",
+    "human_request", "complaint", "order_support",
     "unresolved_query", "crisis",
 }
+# Flags for the seller that never stop the AI: a price objection, a discount
+# ask or "booking karwa do" is answered by the AI (holding the catalog price,
+# collecting the booking details) while the seller sees the chat is hot.
+FLAG_REASONS = {"purchase_assistance"}
 SOFT_REASONS = {"missing_information", "conflicting_information", "generation_unavailable", "price_blocked"}
 
 _TEXTS = {

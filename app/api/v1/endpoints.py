@@ -11,7 +11,7 @@ from app.services.conversation_store import conversation_store, ConversationConf
 from app.services.handoff_policy import handoff_reason, unresolved_feedback, interested
 from app.services import catalog_reply
 from app.services.crisis import is_crisis, crisis_reply, CRISIS_PUBLIC
-from app.services.handoff_texts import lead_confirmation, is_handoff_line
+from app.services.handoff_texts import FLAG_REASONS, lead_confirmation, is_handoff_line
 import json
 
 router = APIRouter()
@@ -103,12 +103,15 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
     failed = unresolved_feedback(req.message_text) and any(m['role'] == 'assistant' for m in memory['history'])
     reason = handoff_reason(req.message_text)
     sku = req.post_context.tagged_product_sku if req.post_context else None
-    if reason:
+    # "Discount do", "itna mehenga kyu", "booking karwa do": the AI answers and
+    # keeps chatting; the seller only sees the chat flagged as a hot one.
+    flag = reason if reason in FLAG_REASONS else None
+    if reason and not flag:
         return handoff(req, row, reason, product=sku)
     if failed and row['unresolved'] >= 1:
         return handoff(req, row, 'unresolved_query')
     if req.offerings is not None:
-        return offering_reply(req, row, memory, failed)
+        return offering_reply(req, row, memory, failed, flag)
     target = None
     if sku:
         target = catalog_store.get_product_by_sku(brand, sku)
@@ -135,7 +138,9 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
             raise ValueError('Empty reply')
     except (LLMUnavailable, ValueError, TypeError, AttributeError):
         return handoff(req, row, 'generation_unavailable', product=target.sku if target else None)
-    if output.handoff_reason:
+    if output.handoff_reason in FLAG_REASONS:
+        flag = output.handoff_reason
+    elif output.handoff_reason:
         return handoff(req, row, output.handoff_reason, product=target.sku if target else None)
     # The older one-product path gets the same checks as catalog replies: no
     # price, fact or link the product (or the customer) did not give.
@@ -149,8 +154,9 @@ def generate_reply(req: GenerateReplyRequest, brand: str = Depends(authenticated
     output.public_reply = public
     failed = failed or (output.previous_answer_unresolved and any(m['role'] == 'assistant' for m in memory['history']))
     current, text = complete(req, row, reply=output.private_dm, product=target.sku if target else None,
-                             interested=output.buying_interest or interested(req.message_text), unresolved=failed,
-                             preferences=[p.model_dump() for p in output.preferences], source_text=req.message_text)
+                             interested=bool(flag) or output.buying_interest or interested(req.message_text),
+                             unresolved=failed, preferences=[p.model_dump() for p in output.preferences],
+                             source_text=req.message_text, flag=flag)
     if current['status'] != 'ai':
         return GenerateReplyResponse(public_reply=text if req.event_type == 'comment' else None,
                                      private_dm=text, intent='human_handoff', **state_fields(current))
@@ -171,7 +177,7 @@ def crisis(req):
                                  **state_fields(current))
 
 
-def offering_reply(req, row, memory, failed):
+def offering_reply(req, row, memory, failed, flag=None):
     """Backend-picked offerings use the same safety, memory and handoff lifecycle.
 
     An empty catalog still lets the model greet, answer from the business
@@ -196,8 +202,14 @@ def offering_reply(req, row, memory, failed):
         result = catalog_reply.finalize(req, output.model_dump())
     except (LLMUnavailable, ValueError, TypeError, AttributeError):
         return handoff(req, row, 'generation_unavailable')
-    if result.requires_human_attention or output.handoff_reason:
-        reason = output.handoff_reason or 'missing_information'
+    if output.handoff_reason in FLAG_REASONS:
+        flag = output.handoff_reason
+    guarded = result.intent in ('price_blocked', 'fact_blocked')
+    if flag and not guarded and result.action == 'HANDOFF':
+        # A purchase chat stays with the AI: its checked answer goes out.
+        result = result.model_copy(update={'action': 'ANSWER', 'requires_human_attention': False})
+    if result.requires_human_attention or (output.handoff_reason and output.handoff_reason not in FLAG_REASONS):
+        reason = output.handoff_reason if output.handoff_reason not in (None, *FLAG_REASONS) else 'missing_information'
         response = handoff(req, row, reason)
         response.offering_ids = result.offering_ids
         response.collected_fields = result.collected_fields
@@ -211,8 +223,10 @@ def offering_reply(req, row, memory, failed):
         # Every detail is in: a confirmation, never the "in the queue" line.
         reply = lead_confirmation(req.message_text)
     current, text = complete(req, row, reply=reply,
-                             interested=output.buying_interest or result.action == 'CREATE_LEAD' or interested(req.message_text),
-                             unresolved=unresolved, preferences=[p.model_dump() for p in output.preferences], source_text=req.message_text)
+                             interested=bool(flag) or output.buying_interest or result.action == 'CREATE_LEAD'
+                             or interested(req.message_text),
+                             unresolved=unresolved, preferences=[p.model_dump() for p in output.preferences],
+                             source_text=req.message_text, flag=flag)
     if current['status'] != 'ai':
         return GenerateReplyResponse(public_reply=text if req.event_type == 'comment' else None,
                                      private_dm=text, intent='human_handoff', action='HANDOFF', **state_fields(current))
